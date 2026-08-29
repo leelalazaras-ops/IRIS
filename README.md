@@ -15,15 +15,26 @@ IRIS follows a modular architecture with clear separation of concerns:
 ```
 src/iris/
 ├── core/       # Core system components and utilities
-├── ai/         # AI model integrations and processing
-├── voice/      # Voice input/output handling
-├── tools/      # Tool definitions and execution
-├── memory/     # Context and memory management
-├── vision/     # Vision and image processing
-├── web/        # Web interface and API
-├── ui/         # User interface components
-└── security/   # Security and authentication
+├── ai/         # AI model integrations and processing (✅ Phase 1 complete)
+├── voice/      # Voice input/output handling (planned)
+├── tools/      # Tool definitions and execution (planned)
+├── memory/     # Context and memory management (planned)
+├── vision/     # Vision and image processing (planned)
+├── web/        # Web interface and API (planned)
+├── ui/         # User interface components (planned)
+└── security/   # Security and authentication (planned)
 ```
+
+### AI Core (Phase 1)
+
+IRIS has a provider-independent AI architecture that allows switching between AI providers through configuration:
+
+- **Provider abstraction**: Clean interface for any OpenAI-compatible API
+- **Configurable runtime**: Connect to OpenAI, OmniRoute, or other services via environment variables
+- **Comprehensive testing**: Full test coverage with offline tests (no API keys needed)
+- **Security-first**: Secret sanitization in logs and error messages
+
+See [AI Architecture Documentation](docs/AI_ARCHITECTURE.md) for detailed information.
 
 ## Setup
 
