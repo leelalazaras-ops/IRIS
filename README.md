@@ -8,6 +8,7 @@ IRIS is a modular AI assistant framework designed for extensibility and clean ar
 
 ✅ **Phase 1 Complete** - AI Core with provider abstraction
 ✅ **Phase 2 Complete** - Interactive CLI conversation loop
+✅ **Phase 3 Complete** - Tool execution framework
 🚧 **In Development** - Additional capabilities planned
 
 ## Architecture
@@ -45,6 +46,16 @@ Terminal-based conversation interface with IRIS:
 - **Graceful error handling**: Clear error messages without exposing sensitive data
 - **Multiple exit methods**: exit, quit, Ctrl+C, Ctrl+D
 - **Provider integration**: Works with any configured OpenAI-compatible provider
+
+### Phase 3: Tool System ✅
+
+Secure tool execution framework:
+
+- **9 Built-in tools**: Filesystem, system info, and utility operations
+- **Safe execution**: Path validation, no arbitrary code execution
+- **Security-first**: Sensitive data filtering, no shell access
+- **Type-safe**: Full argument validation with type checking
+- **CLI integration**: `/tools` and `/help` commands
 
 See [AI Architecture Documentation](docs/AI_ARCHITECTURE.md) for detailed information.
 
@@ -116,8 +127,9 @@ This will start an interactive session:
 
 ```
 IRIS - Intelligent Responsive Interactive System
-Version: 0.2.0
+Version: 0.3.0
 Type 'exit' or 'quit' to close IRIS.
+Type '/help' for available commands.
 
 IRIS> Hello!
 
@@ -128,6 +140,8 @@ IRIS>
 
 **Commands:**
 - Type your message and press Enter to chat with IRIS
+- Type `/tools` to list available tools
+- Type `/help` to see all commands
 - Type `exit` or `quit` to close IRIS
 - Press `Ctrl+C` or `Ctrl+D` to exit
 

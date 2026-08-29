@@ -294,16 +294,23 @@ elif self.config.provider == "my-custom":
 - Multiple exit methods
 - Integration with AI service
 
+### Phase 3: Tool System ✅
+- 9 built-in tools (filesystem, system, utility)
+- Safe execution with path validation
+- Security-first design (no eval, no subprocess)
+- Type-safe argument validation
+- CLI integration (`/tools`, `/help` commands)
+
 See [CLI Usage Guide](CLI_USAGE.md) for interactive usage instructions.
 
 ## Future Phases
 
 This AI core is designed to support IRIS's future capabilities:
 
-- **Phase 3+**: Response streaming
-- **Phase 4+**: Tool execution, function calling
-- **Phase 5+**: Multi-modal inputs (vision, audio)
-- **Phase 6+**: Persistent memory
-- **Phase 7+**: Agent orchestration
+- **Phase 4+**: AI-driven tool execution, function calling
+- **Phase 5+**: Response streaming
+- **Phase 6+**: Multi-modal inputs (vision, audio)
+- **Phase 7+**: Persistent memory
+- **Phase 8+**: Agent orchestration
 
 The provider abstraction keeps these future features isolated from the core architecture.

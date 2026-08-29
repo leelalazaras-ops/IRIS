@@ -9,6 +9,22 @@ from typing import Optional
 
 from iris.ai.service import AIService
 from iris.ai.exceptions import AIError, ConfigurationError
+from iris.tools.registry import ToolRegistry
+from iris.tools.filesystem import (
+    ListDirectoryTool,
+    CreateDirectoryTool,
+    ReadFileTool,
+    WriteFileTool,
+)
+from iris.tools.system import (
+    GetSystemInfoTool,
+    GetCurrentDirectoryTool,
+    GetEnvironmentInfoTool,
+)
+from iris.tools.utility import (
+    GetCurrentTimeTool,
+    CalculateTool,
+)
 
 
 class IRISConversation:
@@ -19,6 +35,33 @@ class IRISConversation:
         self.ai_service: Optional[AIService] = None
         self.conversation_history: list[dict[str, str]] = []
         self.running = False
+        self.tool_registry = self._initialize_tool_registry()
+
+    def _initialize_tool_registry(self) -> ToolRegistry:
+        """
+        Initialize and populate the tool registry.
+
+        Returns:
+            ToolRegistry with all available tools registered
+        """
+        registry = ToolRegistry()
+
+        # Register filesystem tools
+        registry.register(ListDirectoryTool())
+        registry.register(CreateDirectoryTool())
+        registry.register(ReadFileTool())
+        registry.register(WriteFileTool())
+
+        # Register system tools
+        registry.register(GetSystemInfoTool())
+        registry.register(GetCurrentDirectoryTool())
+        registry.register(GetEnvironmentInfoTool())
+
+        # Register utility tools
+        registry.register(GetCurrentTimeTool())
+        registry.register(CalculateTool())
+
+        return registry
 
     async def initialize(self) -> bool:
         """
@@ -60,6 +103,11 @@ class IRISConversation:
         # Handle exit commands
         if user_input.strip().lower() in ('exit', 'quit'):
             return False
+
+        # Handle tool commands
+        stripped_input = user_input.strip()
+        if stripped_input.startswith('/'):
+            return await self.handle_tool_command(stripped_input)
 
         # Add user message to history
         self.conversation_history.append({
@@ -103,14 +151,59 @@ class IRISConversation:
 
         return True
 
+    async def handle_tool_command(self, command: str) -> bool:
+        """
+        Handle tool-related commands.
+
+        Args:
+            command: Command string starting with '/'
+
+        Returns:
+            True to continue, False to exit
+        """
+        parts = command[1:].split(maxsplit=1)
+        cmd = parts[0].lower() if parts else ""
+
+        if cmd == "tools":
+            # List all available tools
+            print("\n📦 Available Tools:\n")
+            tools = self.tool_registry.list_tools()
+            for tool in tools:
+                print(f"  • {tool['name']}")
+                print(f"    {tool['description']}")
+                if tool['arguments']:
+                    print(f"    Arguments:")
+                    for arg in tool['arguments']:
+                        req = "required" if arg['required'] else "optional"
+                        print(f"      - {arg['name']} ({arg['type']}, {req}): {arg['description']}")
+                print()
+            print(f"Total: {len(tools)} tools\n")
+            return True
+
+        elif cmd == "help":
+            # Show help information
+            print("\n📖 IRIS Commands:\n")
+            print("  /tools                 - List all available tools")
+            print("  /tool <name> <args>    - Execute a tool (not implemented)")
+            print("  /help                  - Show this help message")
+            print("  exit, quit             - Exit IRIS")
+            print()
+            return True
+
+        else:
+            print(f"\n❌ Unknown command: /{cmd}")
+            print("Type '/help' for available commands.\n")
+            return True
+
     async def run(self):
         """Run the interactive conversation loop."""
         self.running = True
 
         # Display welcome banner
         print("IRIS - Intelligent Responsive Interactive System")
-        print("Version: 0.2.0")
-        print("Type 'exit' or 'quit' to close IRIS.\n")
+        print("Version: 0.3.0")
+        print("Type 'exit' or 'quit' to close IRIS.")
+        print("Type '/help' for available commands.\n")
 
         # Initialize AI service
         if not await self.initialize():
