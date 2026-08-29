@@ -278,13 +278,32 @@ elif self.config.provider == "my-custom":
 - Implement proper resource cleanup in `close()`
 - Return standard `AIResponse` objects
 
+## Current Status
+
+### Phase 1: AI Core ✅
+- Provider abstraction
+- OpenAI-compatible provider
+- Mock provider for testing
+- Configuration management
+- Exception handling with secret sanitization
+
+### Phase 2: Interactive CLI ✅
+- Terminal conversation interface
+- Session-based conversation history
+- Graceful error handling
+- Multiple exit methods
+- Integration with AI service
+
+See [CLI Usage Guide](CLI_USAGE.md) for interactive usage instructions.
+
 ## Future Phases
 
 This AI core is designed to support IRIS's future capabilities:
 
-- **Phase 2+**: Tool execution, function calling
-- **Phase 3+**: Streaming responses
-- **Phase 4+**: Multi-modal inputs (vision, audio)
-- **Phase 5+**: Agent orchestration
+- **Phase 3+**: Response streaming
+- **Phase 4+**: Tool execution, function calling
+- **Phase 5+**: Multi-modal inputs (vision, audio)
+- **Phase 6+**: Persistent memory
+- **Phase 7+**: Agent orchestration
 
 The provider abstraction keeps these future features isolated from the core architecture.

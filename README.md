@@ -6,7 +6,9 @@ IRIS is a modular AI assistant framework designed for extensibility and clean ar
 
 ## Project Status
 
-🚧 **In Development** - Foundation phase
+✅ **Phase 1 Complete** - AI Core with provider abstraction
+✅ **Phase 2 Complete** - Interactive CLI conversation loop
+🚧 **In Development** - Additional capabilities planned
 
 ## Architecture
 
@@ -25,14 +27,24 @@ src/iris/
 └── security/   # Security and authentication (planned)
 ```
 
-### AI Core (Phase 1)
+### Phase 1: AI Core ✅
 
-IRIS has a provider-independent AI architecture that allows switching between AI providers through configuration:
+Provider-independent AI architecture that allows switching between AI providers through configuration:
 
 - **Provider abstraction**: Clean interface for any OpenAI-compatible API
 - **Configurable runtime**: Connect to OpenAI, OmniRoute, or other services via environment variables
 - **Comprehensive testing**: Full test coverage with offline tests (no API keys needed)
 - **Security-first**: Secret sanitization in logs and error messages
+
+### Phase 2: Interactive CLI ✅
+
+Terminal-based conversation interface with IRIS:
+
+- **Interactive conversation loop**: Natural back-and-forth chat interface
+- **Session history**: Context-aware responses within the current session
+- **Graceful error handling**: Clear error messages without exposing sensitive data
+- **Multiple exit methods**: exit, quit, Ctrl+C, Ctrl+D
+- **Provider integration**: Works with any configured OpenAI-compatible provider
 
 See [AI Architecture Documentation](docs/AI_ARCHITECTURE.md) for detailed information.
 
@@ -62,10 +74,64 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -e ".[dev]"
 ```
 
-4. Copy the environment template:
+4. Copy the environment template and configure your AI provider:
 ```bash
 cp .env.example .env
 ```
+
+5. Edit `.env` with your AI provider settings:
+```bash
+# For OpenAI
+IRIS_AI_PROVIDER=openai-compatible
+IRIS_AI_BASE_URL=https://api.openai.com/v1
+IRIS_AI_API_KEY=your_openai_api_key_here
+IRIS_AI_MODEL=gpt-3.5-turbo
+
+# For OmniRoute or other OpenAI-compatible services
+IRIS_AI_PROVIDER=openai-compatible
+IRIS_AI_BASE_URL=https://your-service-endpoint.com/v1
+IRIS_AI_API_KEY=your_api_key_here
+IRIS_AI_MODEL=gpt-4
+
+# For testing without API keys
+IRIS_AI_PROVIDER=mock
+```
+
+## Usage
+
+### Running IRIS
+
+Start the interactive conversation interface:
+
+```bash
+iris
+```
+
+Or with the virtual environment activated:
+```bash
+python -m iris.core.cli
+```
+
+This will start an interactive session:
+
+```
+IRIS - Intelligent Responsive Interactive System
+Version: 0.2.0
+Type 'exit' or 'quit' to close IRIS.
+
+IRIS> Hello!
+
+IRIS: Hello! How can I help you today?
+
+IRIS> 
+```
+
+**Commands:**
+- Type your message and press Enter to chat with IRIS
+- Type `exit` or `quit` to close IRIS
+- Press `Ctrl+C` or `Ctrl+D` to exit
+
+**Note**: IRIS maintains conversation history during the current session for context-aware responses.
 
 ## Development
 
@@ -79,6 +145,8 @@ With coverage:
 ```bash
 pytest --cov=iris --cov-report=html
 ```
+
+All tests pass without requiring API keys (using the mock provider).
 
 ### Project Structure
 
