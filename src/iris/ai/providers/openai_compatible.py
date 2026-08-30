@@ -12,6 +12,7 @@ from iris.ai.exceptions import (
     ResponseError,
     ProviderError,
 )
+from iris.tools.orchestration import ToolCall
 
 
 class OpenAICompatibleProvider(AIProvider):
@@ -81,6 +82,12 @@ class OpenAICompatibleProvider(AIProvider):
         if request.max_tokens is not None:
             payload["max_tokens"] = request.max_tokens
 
+        # Add tools if provided
+        if request.tools is not None:
+            payload["tools"] = request.tools
+            # Let the model decide when to use tools
+            payload["tool_choice"] = "auto"
+
         # Add any provider-specific metadata
         payload.update(request.metadata)
 
@@ -132,6 +139,35 @@ class OpenAICompatibleProvider(AIProvider):
                 message = choices[0].get("message", {})
                 content = message.get("content", "")
 
+                # Check for tool calls in the response
+                tool_calls = None
+                tool_calls_data = message.get("tool_calls")
+                if tool_calls_data:
+                    tool_calls = []
+                    for tc in tool_calls_data:
+                        # Parse OpenAI tool call format
+                        # {
+                        #   "id": "call_xxx",
+                        #   "type": "function",
+                        #   "function": {"name": "tool_name", "arguments": "{\"arg\": \"value\"}"}
+                        # }
+                        function_data = tc.get("function", {})
+                        tool_name = function_data.get("name", "")
+                        arguments_str = function_data.get("arguments", "{}")
+
+                        # Parse arguments JSON
+                        import json
+                        try:
+                            arguments = json.loads(arguments_str)
+                        except json.JSONDecodeError:
+                            arguments = {}
+
+                        tool_calls.append(ToolCall(
+                            id=tc.get("id", ""),
+                            tool_name=tool_name,
+                            arguments=arguments
+                        ))
+
                 usage = data.get("usage", {})
                 model_used = data.get("model", self.model)
 
@@ -145,7 +181,8 @@ class OpenAICompatibleProvider(AIProvider):
                     },
                     metadata={
                         "finish_reason": choices[0].get("finish_reason"),
-                    }
+                    },
+                    tool_calls=tool_calls
                 )
             except (KeyError, IndexError, TypeError) as e:
                 raise ResponseError(

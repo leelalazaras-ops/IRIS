@@ -4,12 +4,13 @@ AI service facade for IRIS.
 Provides a high-level interface for AI operations without exposing provider details.
 """
 
-from typing import Optional
+from typing import Any, Optional
 from iris.ai.config import AIConfig
 from iris.ai.provider import AIProvider, AIRequest, AIResponse
 from iris.ai.providers.mock import MockProvider
 from iris.ai.providers.openai_compatible import OpenAICompatibleProvider
 from iris.ai.exceptions import ConfigurationError
+from iris.tools.orchestration import ToolCall
 
 
 class AIService:
@@ -120,6 +121,40 @@ class AIService:
 
         provider = self._get_provider()
         return await provider.generate(request)
+
+    async def generate_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+    ) -> tuple[str, list[ToolCall]]:
+        """
+        Generate a response with tool support.
+
+        Args:
+            messages: List of conversation messages with 'role' and 'content' keys
+            tools: Tool definitions in provider-specific format
+            temperature: Sampling temperature (0.0 to 2.0)
+            max_tokens: Maximum tokens to generate (optional)
+
+        Returns:
+            Tuple of (final_response_content, tool_calls)
+
+        Raises:
+            AIError: If generation fails
+        """
+        request = AIRequest(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+        )
+
+        provider = self._get_provider()
+        response = await provider.generate(request)
+
+        return response.content, response.tool_calls or []
 
     async def close(self) -> None:
         """

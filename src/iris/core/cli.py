@@ -10,6 +10,8 @@ from typing import Optional
 from iris.ai.service import AIService
 from iris.ai.exceptions import AIError, ConfigurationError
 from iris.tools.registry import ToolRegistry
+from iris.tools.orchestration import ToolOrchestrator, OrchestrationConfig, ToolCall
+from iris.tools.schemas import ToolSchemaConverter
 from iris.tools.filesystem import (
     ListDirectoryTool,
     CreateDirectoryTool,
@@ -36,6 +38,11 @@ class IRISConversation:
         self.conversation_history: list[dict[str, str]] = []
         self.running = False
         self.tool_registry = self._initialize_tool_registry()
+        self.orchestrator = ToolOrchestrator(
+            self.tool_registry,
+            OrchestrationConfig(max_tool_calls=5, enable_tools=True)
+        )
+        self.tools_enabled = True  # Can be toggled by user
 
     def _initialize_tool_registry(self) -> ToolRegistry:
         """
@@ -116,11 +123,16 @@ class IRISConversation:
         })
 
         try:
-            # Generate response
-            response = await self.ai_service.generate(
-                messages=self.conversation_history,
-                temperature=0.7,
-            )
+            if self.tools_enabled:
+                # Use orchestrator for tool-enabled conversation
+                response, tool_calls = await self._process_with_tools()
+            else:
+                # Standard conversation without tools
+                response = await self.ai_service.generate(
+                    messages=self.conversation_history,
+                    temperature=0.7,
+                )
+                tool_calls = []
 
             # Add assistant response to history
             self.conversation_history.append({
@@ -131,14 +143,21 @@ class IRISConversation:
             # Display response
             print(f"\nIRIS: {response}\n")
 
+            # Display tool execution info if any
+            if tool_calls:
+                for tc in tool_calls:
+                    print(f"  🔧 Tool executed: {tc.tool_name}")
+
         except AIError as e:
             # Remove the user message from history since we couldn't process it
-            self.conversation_history.pop()
+            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                self.conversation_history.pop()
             print(f"\n❌ AI Error: {e.message}")
             print("Please try again or check your configuration.\n")
         except Exception as e:
             # Remove the user message from history
-            self.conversation_history.pop()
+            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
+                self.conversation_history.pop()
             # Sanitize error message to avoid leaking sensitive data
             error_msg = str(e)
             # Don't expose API keys or tokens in error messages
@@ -184,9 +203,31 @@ class IRISConversation:
             # Show help information
             print("\n📖 IRIS Commands:\n")
             print("  /tools                 - List all available tools")
-            print("  /tool <name> <args>    - Execute a tool (not implemented)")
+            print("  /enable-tools          - Enable AI tool orchestration")
+            print("  /disable-tools         - Disable AI tool orchestration")
+            print("  /tool-status           - Show tool orchestration status")
             print("  /help                  - Show this help message")
             print("  exit, quit             - Exit IRIS")
+            print()
+            return True
+
+        elif cmd == "enable-tools":
+            self.tools_enabled = True
+            self.orchestrator.config.enable_tools = True
+            print("\n✅ Tool orchestration enabled\n")
+            return True
+
+        elif cmd == "disable-tools":
+            self.tools_enabled = False
+            self.orchestrator.config.enable_tools = False
+            print("\n🚫 Tool orchestration disabled\n")
+            return True
+
+        elif cmd == "tool-status":
+            print(f"\n⚙️ Tool Orchestration Status:\n")
+            print(f"  Enabled: {'Yes' if self.tools_enabled else 'No'}")
+            print(f"  Max tool calls per turn: {self.orchestrator.config.max_tool_calls}")
+            print(f"  Available tools: {len(self.tool_registry.get_tool_names())}")
             print()
             return True
 
@@ -194,6 +235,59 @@ class IRISConversation:
             print(f"\n❌ Unknown command: /{cmd}")
             print("Type '/help' for available commands.\n")
             return True
+
+    async def _process_with_tools(self) -> tuple[str, list[ToolCall]]:
+        """
+        Process a conversation turn with tool support.
+
+        Returns:
+            Tuple of (final_response, executed_tool_calls)
+        """
+        if not self.ai_service:
+            raise RuntimeError("AI service not initialized")
+
+        # Reset tool call counter for this user turn
+        self.orchestrator.reset_call_count()
+
+        # Build tool definitions in OpenAI format
+        tool_defs = ToolSchemaConverter.registry_to_openai_functions(
+            self.tool_registry
+        )
+
+        # Use AIService to generate with tools
+        response_content, tool_calls = await self.ai_service.generate_with_tools(
+            messages=self.conversation_history,
+            tools=tool_defs if tool_defs else [],
+            temperature=0.7,
+        )
+
+        # Check if AI requested tool calls
+        if tool_calls:
+            # Execute tool calls through orchestrator
+            results = await self.orchestrator.execute_tool_calls(tool_calls)
+
+            # Format results for conversation
+            tool_messages = ToolOrchestrator.format_tool_results_for_messages(
+                tool_calls,
+                results
+            )
+
+            # Add tool results to conversation history
+            self.conversation_history.extend(tool_messages)
+
+            # Get final response from AI with tool results
+            final_content, final_tool_calls = await self.ai_service.generate_with_tools(
+                messages=self.conversation_history,
+                tools=tool_defs if tool_defs else [],
+                temperature=0.7,
+            )
+
+            # For now, just return final response
+            # In a more advanced version, we could loop for multiple rounds
+            return final_content, tool_calls
+
+        # No tool calls, return regular response
+        return response_content, []
 
     async def run(self):
         """Run the interactive conversation loop."""

@@ -6,7 +6,10 @@ Defines the interface that all AI providers must implement.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from iris.tools.orchestration import ToolCall
 
 
 @dataclass
@@ -19,11 +22,13 @@ class AIRequest:
         temperature: Sampling temperature (0.0 to 2.0)
         max_tokens: Maximum tokens to generate
         metadata: Additional provider-specific options
+        tools: Optional tool definitions in provider-specific format
     """
     messages: list[dict[str, str]]
     temperature: float = 0.7
     max_tokens: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    tools: Optional[list[dict[str, Any]]] = None
 
     def __post_init__(self):
         """Validate request parameters."""
@@ -45,11 +50,18 @@ class AIResponse:
         model: Model identifier used
         usage: Token usage information
         metadata: Additional provider-specific data
+        tool_calls: Optional list of tool calls requested by the AI
     """
     content: str
     model: str
     usage: dict[str, int] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    tool_calls: list['ToolCall'] = field(default_factory=list)
+
+    def __post_init__(self):
+        """Ensure tool_calls is never None."""
+        if self.tool_calls is None:
+            self.tool_calls = []
 
 
 class AIProvider(ABC):

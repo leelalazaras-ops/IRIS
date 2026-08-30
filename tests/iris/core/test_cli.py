@@ -168,6 +168,9 @@ class TestIRISConversation:
         conversation = IRISConversation()
         await conversation.initialize()
 
+        # Disable tools to test standard conversation behavior (Phase 2)
+        conversation.tools_enabled = False
+
         # Mock the generate method to raise an error
         async def mock_error(*args, **kwargs):
             raise ProviderError("Test provider error")
@@ -197,6 +200,9 @@ class TestIRISConversation:
         conversation = IRISConversation()
         await conversation.initialize()
 
+        # Disable tools to test standard conversation behavior (Phase 2)
+        conversation.tools_enabled = False
+
         # Mock the generate method to raise a generic error
         async def mock_error(*args, **kwargs):
             raise Exception("Generic error")
@@ -223,6 +229,7 @@ class TestIRISConversation:
         monkeypatch.setenv("IRIS_AI_PROVIDER", "mock")
 
         conversation = IRISConversation()
+        conversation.tools_enabled = False
         await conversation.initialize()
 
         # Mock error with sensitive data
@@ -246,6 +253,7 @@ class TestIRISConversation:
         monkeypatch.setenv("IRIS_AI_PROVIDER", "mock")
 
         conversation = IRISConversation()
+        conversation.tools_enabled = False
         await conversation.initialize()
 
         # Mock error with token
@@ -368,6 +376,7 @@ class TestCLIIntegration:
         monkeypatch.setenv("IRIS_AI_PROVIDER", "mock")
 
         conversation = IRISConversation()
+        conversation.tools_enabled = False
         await conversation.initialize()
 
         # Successful message
