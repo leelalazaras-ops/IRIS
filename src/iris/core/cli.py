@@ -5,7 +5,7 @@ Command-line interface for IRIS.
 import asyncio
 import sys
 import signal
-from typing import Optional
+from typing import Optional, List, Dict
 
 from iris.ai.service import AIService
 from iris.ai.exceptions import AIError, ConfigurationError
@@ -27,6 +27,7 @@ from iris.tools.utility import (
     GetCurrentTimeTool,
     CalculateTool,
 )
+from iris.memory.manager import MemoryManager
 
 
 class IRISConversation:
@@ -35,7 +36,7 @@ class IRISConversation:
     def __init__(self):
         """Initialize the conversation manager."""
         self.ai_service: Optional[AIService] = None
-        self.conversation_history: list[dict[str, str]] = []
+        self.memory_manager = MemoryManager()
         self.running = False
         self.tool_registry = self._initialize_tool_registry()
         self.orchestrator = ToolOrchestrator(
@@ -43,6 +44,16 @@ class IRISConversation:
             OrchestrationConfig(max_tool_calls=5, enable_tools=True)
         )
         self.tools_enabled = True  # Can be toggled by user
+
+    @property
+    def conversation_history(self):
+        """Get conversation history for backward compatibility with tests."""
+        return self.memory_manager.context.turns
+
+    @conversation_history.setter
+    def conversation_history(self, value):
+        """Set conversation history for backward compatibility with tests."""
+        self.memory_manager.context.turns = value
 
     def _initialize_tool_registry(self) -> ToolRegistry:
         """
@@ -116,11 +127,8 @@ class IRISConversation:
         if stripped_input.startswith('/'):
             return await self.handle_tool_command(stripped_input)
 
-        # Add user message to history
-        self.conversation_history.append({
-            "role": "user",
-            "content": user_input.strip()
-        })
+        # Add user message to memory
+        self.memory_manager.add_user_message(user_input.strip())
 
         try:
             if self.tools_enabled:
@@ -129,16 +137,13 @@ class IRISConversation:
             else:
                 # Standard conversation without tools
                 response = await self.ai_service.generate(
-                    messages=self.conversation_history,
+                    messages=self.memory_manager.get_messages_for_ai(),
                     temperature=0.7,
                 )
                 tool_calls = []
 
-            # Add assistant response to history
-            self.conversation_history.append({
-                "role": "assistant",
-                "content": response
-            })
+            # Add assistant response to memory
+            self.memory_manager.add_assistant_message(response)
 
             # Display response
             print(f"\nIRIS: {response}\n")
@@ -149,15 +154,13 @@ class IRISConversation:
                     print(f"  🔧 Tool executed: {tc.tool_name}")
 
         except AIError as e:
-            # Remove the user message from history since we couldn't process it
-            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                self.conversation_history.pop()
+            # Remove the user message from memory since we couldn't process it
+            self.memory_manager.remove_last_turn()
             print(f"\n❌ AI Error: {e.message}")
             print("Please try again or check your configuration.\n")
         except Exception as e:
-            # Remove the user message from history
-            if self.conversation_history and self.conversation_history[-1]["role"] == "user":
-                self.conversation_history.pop()
+            # Remove the user message from memory
+            self.memory_manager.remove_last_turn()
             # Sanitize error message to avoid leaking sensitive data
             error_msg = str(e)
             # Don't expose API keys or tokens in error messages
@@ -261,7 +264,7 @@ class IRISConversation:
         while True:
             # Use AIService to generate with tools
             response_content, tool_calls = await self.ai_service.generate_with_tools(
-                messages=self.conversation_history,
+                messages=self.memory_manager.get_messages_for_ai(),
                 tools=tool_defs if tool_defs else [],
                 temperature=0.7,
             )
@@ -280,8 +283,16 @@ class IRISConversation:
                 results
             )
 
-            # Add tool results to conversation history
-            self.conversation_history.extend(tool_messages)
+            # Add tool results to memory
+            for message in tool_messages:
+                if message["role"] == "user":
+                    self.memory_manager.add_user_message(message["content"])
+                elif message["role"] == "assistant":
+                    self.memory_manager.add_assistant_message(message["content"])
+                elif message["role"] == "tool":
+                    # For tool messages, we need to add them directly to turns
+                    # since they don't fit the standard user/assistant pattern
+                    self.memory_manager.context.turns.append(message)
 
             # Accumulate tool calls requested (including those that may have been limited)
             all_tool_calls.extend(tool_calls)
