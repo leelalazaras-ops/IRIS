@@ -239,9 +239,10 @@ class IRISConversation:
     async def _process_with_tools(self) -> tuple[str, list[ToolCall]]:
         """
         Process a conversation turn with tool support.
+        Executes a loop: AI -> tool execution -> AI -> ... until AI returns no tool calls.
 
         Returns:
-            Tuple of (final_response, executed_tool_calls)
+            Tuple of (final_response, all_tool_calls_requested)
         """
         if not self.ai_service:
             raise RuntimeError("AI service not initialized")
@@ -254,16 +255,23 @@ class IRISConversation:
             self.tool_registry
         )
 
-        # Use AIService to generate with tools
-        response_content, tool_calls = await self.ai_service.generate_with_tools(
-            messages=self.conversation_history,
-            tools=tool_defs if tool_defs else [],
-            temperature=0.7,
-        )
+        # Accumulate all tool calls requested across rounds
+        all_tool_calls: list[ToolCall] = []
 
-        # Check if AI requested tool calls
-        if tool_calls:
-            # Execute tool calls through orchestrator
+        while True:
+            # Use AIService to generate with tools
+            response_content, tool_calls = await self.ai_service.generate_with_tools(
+                messages=self.conversation_history,
+                tools=tool_defs if tool_defs else [],
+                temperature=0.7,
+            )
+
+            # If AI requested no tool calls, we are done
+            if not tool_calls:
+                # This is the final response
+                return response_content, all_tool_calls
+
+            # Execute tool calls through orchestrator (respects max_tool_calls limit)
             results = await self.orchestrator.execute_tool_calls(tool_calls)
 
             # Format results for conversation
@@ -275,19 +283,8 @@ class IRISConversation:
             # Add tool results to conversation history
             self.conversation_history.extend(tool_messages)
 
-            # Get final response from AI with tool results
-            final_content, final_tool_calls = await self.ai_service.generate_with_tools(
-                messages=self.conversation_history,
-                tools=tool_defs if tool_defs else [],
-                temperature=0.7,
-            )
-
-            # For now, just return final response
-            # In a more advanced version, we could loop for multiple rounds
-            return final_content, tool_calls
-
-        # No tool calls, return regular response
-        return response_content, []
+            # Accumulate tool calls requested (including those that may have been limited)
+            all_tool_calls.extend(tool_calls)
 
     async def run(self):
         """Run the interactive conversation loop."""
