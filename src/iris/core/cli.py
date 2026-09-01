@@ -29,6 +29,14 @@ from iris.tools.utility import (
 )
 from iris.memory.manager import MemoryManager
 
+# Phase 7: Intent & Action Engine imports
+from iris.intent.models import Intent
+from iris.planning.planner import Planner
+from iris.planning.models import ActionPlan, ActionStep
+from iris.safety.classifier import SafetyClassifier, SafetyLevel
+from iris.results.models import ActionResult
+from iris.results.handler import ResultHandler
+
 
 class IRISConversation:
     """Manages an interactive conversation session with IRIS."""
@@ -44,6 +52,16 @@ class IRISConversation:
             OrchestrationConfig(max_tool_calls=5, enable_tools=True)
         )
         self.tools_enabled = True  # Can be toggled by user
+
+        # Phase 7: Intent & Action Engine components
+        self.safety_classifier = SafetyClassifier(self.tool_registry)
+        self.planner = Planner(self.tool_registry, self.safety_classifier)
+        self.result_handler = ResultHandler(self.memory_manager)
+
+        # Conversation state for Phase 7
+        self.dry_run_mode = False
+        self.pending_confirmation: Optional[ActionStep] = None
+        self.pending_plan: Optional[ActionPlan] = None
 
     @property
     def conversation_history(self):
@@ -131,27 +149,21 @@ class IRISConversation:
         self.memory_manager.add_user_message(user_input.strip())
 
         try:
+            # Phase 7: Process with intent & action engine
             if self.tools_enabled:
-                # Use orchestrator for tool-enabled conversation
-                response, tool_calls = await self._process_with_tools()
+                response = await self._process_with_intent_and_action(user_input.strip())
             else:
                 # Standard conversation without tools
                 response = await self.ai_service.generate(
                     messages=self.memory_manager.get_messages_for_ai(),
                     temperature=0.7,
                 )
-                tool_calls = []
 
             # Add assistant response to memory
             self.memory_manager.add_assistant_message(response)
 
             # Display response
             print(f"\nIRIS: {response}\n")
-
-            # Display tool execution info if any
-            if tool_calls:
-                for tc in tool_calls:
-                    print(f"  🔧 Tool executed: {tc.tool_name}")
 
         except AIError as e:
             # Remove the user message from memory since we couldn't process it
@@ -168,7 +180,7 @@ class IRISConversation:
                 if sensitive_word in error_msg.lower():
                     error_msg = "An error occurred. Please check your configuration."
                     break
-            print(f"\n❌ Error: {error_msg}")
+            print(f"\n❝ Error: {error_msg}")
             print("Please try again.\n")
 
         return True
@@ -185,6 +197,7 @@ class IRISConversation:
         """
         parts = command[1:].split(maxsplit=1)
         cmd = parts[0].lower() if parts else ""
+        args = parts[1] if len(parts) > 1 else ""
 
         if cmd == "tools":
             # List all available tools
@@ -210,6 +223,9 @@ class IRISConversation:
             print("  /disable-tools         - Disable AI tool orchestration")
             print("  /tool-status           - Show tool orchestration status")
             print("  /help                  - Show this help message")
+            print("  /dry-run               - Toggle dry-run mode (show plans without executing)")
+            print("  /confirm               - Confirm pending action")
+            print("  /cancel                - Cancel pending action")
             print("  exit, quit             - Exit IRIS")
             print()
             return True
@@ -234,10 +250,175 @@ class IRISConversation:
             print()
             return True
 
+        elif cmd == "dry-run":
+            self.dry_run_mode = not self.dry_run_mode
+            status = "enabled" if self.dry_run_mode else "disabled"
+            print(f"\n🔍 Dry-run mode {status}\n")
+            return True
+
+        elif cmd == "confirm":
+            if self.pending_confirmation is not None:
+                print(f"\n✅ Confirming action: {self.pending_confirmation.description}")
+                # Execute the pending action
+                await self._execute_action_step(self.pending_confirmation)
+                self.pending_confirmation = None
+                self.pending_plan = None
+            else:
+                print("\n❌ No pending action to confirm\n")
+            return True
+
+        elif cmd == "cancel":
+            if self.pending_confirmation is not None:
+                print(f"\n❌ Cancelling action: {self.pending_confirmation.description}")
+                self.pending_confirmation = None
+                self.pending_plan = None
+            else:
+                print("\n❌ No pending action to cancel\n")
+            return True
+
         else:
             print(f"\n❌ Unknown command: /{cmd}")
             print("Type '/help' for available commands.\n")
             return True
+
+    async def _process_with_intent_and_action(self, user_input: str) -> str:
+        """
+        Process user input through the Phase 7 intent and action engine.
+        This follows the same pattern as _process_with_tools but adds intent understanding.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            The AI's response string
+        """
+        if not self.ai_service:
+            raise RuntimeError("AI service not initialized")
+
+        # Try to interpret as intent for action execution
+        intent = self._create_intent_from_user_input(user_input.strip())
+
+        # Only proceed with action execution if confidence is high enough
+        # For now, we'll use a threshold of 0.7
+        if intent.confidence <= 0.7:
+            # Fall back to normal tool processing for low-confidence intents
+            response_content, _ = await self._process_with_tools()
+            return response_content
+
+        # Create action plan from intent
+        plan = self.planner.plan(intent)
+
+        # Check if we have any steps to execute
+        if not plan.steps:
+            # If no plan steps, fall back to normal processing
+            response_content, _ = await self._process_with_tools()
+            return response_content
+
+        # We have a plan to execute - we'll execute it directly
+        # But we still want to follow the tool execution pattern for consistency
+
+        # Reset tool call counter for this user turn
+        self.orchestrator.reset_call_count()
+
+        # Convert our action steps to tool calls
+        tool_calls: list[ToolCall] = []
+        for i, step in enumerate(plan.steps):
+            # Check safety classification
+            if self.safety_classifier.is_blocked(step.tool_name, step.arguments):
+                # Create a failed tool result for blocked actions
+                from iris.tools.base import ToolResult
+                tool_result = ToolResult(
+                    success=False,
+                    content=None,
+                    error=f"Action blocked: {step.description}",
+                    metadata={"blocked_by_safety": True}
+                )
+
+                # Format as tool message and add to memory
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": f"blocked_{i}",
+                    "name": step.tool_name,
+                    "content": f"Error: {tool_result.error}"
+                }
+                self.memory_manager.context.turns.append(tool_message)
+                continue
+
+            if self.safety_classifier.requires_confirmation(step.tool_name, step.arguments):
+                # For confirmation-required actions, we need to handle specially
+                if self.dry_run_mode:
+                    # In dry run, simulate execution
+                    from iris.tools.base import ToolResult
+                    tool_result = await self._execute_action_step_dry_run(step)
+                else:
+                    # Store for confirmation and return early
+                    self.pending_confirmation = step
+                    self.pending_plan = plan
+                    return f"⚠️  Action requires confirmation: {step.description}\nType '/confirm' to proceed or '/cancel' to abort."
+
+                # Format successful result
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": f"dry_run_{i}",
+                    "name": step.tool_name,
+                    "content": str(tool_result.content) if tool_result.success else f"Error: {tool_result.error}"
+                }
+                self.memory_manager.context.turns.append(tool_message)
+                continue
+
+            # Safe action - create tool call
+            tool_call = ToolCall(
+                id=f"action_{i}",
+                tool_name=step.tool_name,
+                arguments=step.arguments
+            )
+            tool_calls.append(tool_call)
+
+        # If we have tool calls to execute (safe actions), execute them
+        if tool_calls:
+            # Execute tool calls through orchestrator
+            results = await self.orchestrator.execute_tool_calls(tool_calls)
+
+            # Format results for conversation
+            tool_messages = ToolOrchestrator.format_tool_results_for_messages(
+                tool_calls,
+                results
+            )
+
+            # Add tool results to memory
+            for message in tool_messages:
+                if message["role"] == "user":
+                    self.memory_manager.add_user_message(message["content"])
+                elif message["role"] == "assistant":
+                    self.memory_manager.add_assistant_message(message["content"])
+                elif message["role"] == "tool":
+                    # For tool messages, we need to add them directly to turns
+                    # since they don't fit the standard user/assistant pattern
+                    self.memory_manager.context.turns.append(message)
+
+            # Now generate final response based on the tool results
+            response_content = await self.ai_service.generate(
+                messages=self.memory_manager.get_messages_for_ai(),
+                temperature=0.7,
+            )
+
+            # Add assistant response to memory
+            self.memory_manager.add_assistant_message(response_content)
+
+            return response_content
+        else:
+            # No tool calls to execute (all were blocked or handled specially)
+            # Generate response based on what happened
+            if self.pending_confirmation is not None:
+                # This shouldn't happen because we returned early above, but just in case
+                return f"⚠️  Action requires confirmation: {self.pending_confirmation.description}\nType '/confirm' to proceed or '/cancel' to abort."
+            else:
+                # All actions were blocked or we had dry run results
+                # Generate a summary response
+                return await self.ai_service.generate(
+                    messages=self.memory_manager.get_messages_for_ai(),
+                    temperature=0.7,
+                )
 
     async def _process_with_tools(self) -> tuple[str, list[ToolCall]]:
         """
@@ -296,6 +477,208 @@ class IRISConversation:
 
             # Accumulate tool calls requested (including those that may have been limited)
             all_tool_calls.extend(tool_calls)
+
+    def _create_intent_from_user_input(self, user_input: str) -> Intent:
+        """
+        Create an intent from user input.
+        This is a simplified implementation - in a full system, this would use AI to interpret intent.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            Intent: The interpreted intent
+        """
+        # Simple keyword-based intent detection for demonstration
+        user_lower = user_input.lower().strip()
+
+        # Map common phrases to intent actions
+        if any(word in user_lower for word in ["read", "show", "display", "cat"]):
+            if "." in user_lower or "/" in user_lower or "\\" in user_lower:
+                # Likely a file path mentioned
+                return Intent(
+                    action="read_file",
+                    arguments={"path": self._extract_file_path(user_input)},
+                    confidence=0.8,
+                    original_request=user_input
+                )
+            else:
+                return Intent(
+                    action="read_file",
+                    arguments={"path": "."},  # Default to current directory
+                    confidence=0.5,
+                    original_request=user_input
+                )
+
+        elif any(word in user_lower for word in ["list", "dir", "ls"]):
+            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input or "." in user_input) else "."
+            # Check if this is likely a genuine ls command or just coincidental match
+            word_match = next((word for word in ["list", "dir", "ls"] if word in user_lower), None)
+            confidence = 0.8
+            if word_match == "ls" and not (
+                user_lower.startswith("ls ") or
+                user_lower.endswith(" ls") or
+                " ls " in user_lower or
+                user_lower == "ls"
+            ):
+                # If we matched "ls" but it's not standing alone, reduce confidence
+                confidence = 0.3
+            return Intent(
+                action="list_directory",
+                arguments={"path": path},
+                confidence=confidence,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["create", "make", "mkdir"]):
+            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input) else "new_folder"
+            return Intent(
+                action="create_directory",
+                arguments={"path": path},
+                confidence=0.8,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["write", "save", "put"]):
+            # Very simple extraction - in reality this would be more sophisticated
+            return Intent(
+                action="write_file",
+                arguments={"path": "new_file.txt", "content": "File content"},
+                confidence=0.6,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["time", "clock"]):
+            return Intent(
+                action="get_current_time",
+                arguments={},
+                confidence=0.6,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["calculate", "compute", "math"]):
+            # Extract expression - simple version
+            return Intent(
+                action="calculate",
+                arguments={"expression": "2+2"},  # Placeholder
+                confidence=0.7,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["system", "info", "spec"]):
+            return Intent(
+                action="get_system_info",
+                arguments={},
+                confidence=0.8,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["directory", "folder", "pwd"]):
+            return Intent(
+                action="get_current_directory",
+                arguments={},
+                confidence=0.8,
+                original_request=user_input
+            )
+
+        elif any(word in user_lower for word in ["environment", "env", "variable"]):
+            return Intent(
+                action="get_environment_info",
+                arguments={},
+                confidence=0.8,
+                original_request=user_input
+            )
+
+        else:
+            # Default to a safe action - get current time
+            return Intent(
+                action="get_current_time",
+                arguments={},
+                confidence=0.3,
+                original_request=user_input
+            )
+
+    def _extract_file_path(self, user_input: str) -> str:
+        """
+        Extract a file path from user input.
+        Very simple implementation - looks for common path patterns.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            str: Extracted path or default
+        """
+        # Look for patterns that might be file paths
+        words = user_input.split()
+        for word in words:
+            if "." in word and "/" in word or "\\" in word:
+                return word
+            if word.startswith("./") or word.startswith(".\\") or word.startswith("/") or len(word) > 1 and word[1] == ":":
+                return word
+        return "."  # Default to current directory
+
+    async def _execute_action_step(self, step: ActionStep) -> ActionResult:
+        """
+        Execute a single action step and return the result.
+
+        Args:
+            step: The ActionStep to execute
+
+        Returns:
+            ActionResult: The result of executing the step
+        """
+        try:
+            # Execute the tool through the registry
+            tool_result = await self.tool_registry.execute(
+                step.tool_name,
+                **step.arguments
+            )
+
+            # Convert ToolResult to ActionResult
+            action_result = ActionResult(
+                step=step,
+                success=tool_result.success,
+                content=tool_result.content,
+                error=tool_result.error,
+                safety_classification=step.safety_classification,
+                metadata=tool_result.metadata
+            )
+
+            # Handle the result (store in memory, etc.)
+            self.result_handler.handle_result(action_result)
+
+            return action_result
+
+        except Exception as e:
+            # Create a failed result
+            action_result = ActionResult(
+                step=step,
+                success=False,
+                error=str(e),
+                safety_classification=step.safety_classification
+            )
+            self.result_handler.handle_result(action_result)
+            return action_result
+
+    async def _execute_action_step_dry_run(self, step: ActionStep) -> ToolResult:
+        """
+        Simulate executing an action step for dry-run mode.
+
+        Args:
+            step: The ActionStep to simulate
+
+        Returns:
+            ToolResult: Simulated result of executing the step
+        """
+        # For dry run, we just return a simulated success result
+        # In a more sophisticated implementation, we might validate arguments
+        # or check preconditions without actually executing
+        return ToolResult(
+            success=True,
+            content=f"[DRY RUN] Would execute: {step.description}",
+            metadata={"dry_run": True}
+        )
 
     async def run(self):
         """Run the interactive conversation loop."""
