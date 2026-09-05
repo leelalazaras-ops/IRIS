@@ -3,6 +3,7 @@ Command-line interface for IRIS.
 """
 
 import asyncio
+import json
 import sys
 import signal
 from typing import Optional, List, Dict
@@ -110,7 +111,7 @@ class IRISConversation:
             self.ai_service = AIService()
             return True
         except ConfigurationError as e:
-            print(f"\n❌ Configuration error: {e.message}")
+            print(f"\nERROR: Configuration error: {e.message}")
             print("\nPlease check your environment variables:")
             print("  - IRIS_AI_PROVIDER (default: openai-compatible)")
             print("  - IRIS_AI_BASE_URL (required for openai-compatible)")
@@ -119,7 +120,7 @@ class IRISConversation:
             print("\nSee .env.example for configuration examples.")
             return False
         except Exception as e:
-            print(f"\n❌ Unexpected error during initialization: {str(e)}")
+            print(f"\nERROR: Unexpected error during initialization: {str(e)}")
             return False
 
     async def handle_user_input(self, user_input: str) -> bool:
@@ -168,7 +169,7 @@ class IRISConversation:
         except AIError as e:
             # Remove the user message from memory since we couldn't process it
             self.memory_manager.remove_last_turn()
-            print(f"\n❌ AI Error: {e.message}")
+            print(f"\nERROR: AI Error: {e.message}")
             print("Please try again or check your configuration.\n")
         except Exception as e:
             # Remove the user message from memory
@@ -180,7 +181,7 @@ class IRISConversation:
                 if sensitive_word in error_msg.lower():
                     error_msg = "An error occurred. Please check your configuration."
                     break
-            print(f"\n❝ Error: {error_msg}")
+            print(f"\nError: {error_msg}")
             print("Please try again.\n")
 
         return True
@@ -201,7 +202,7 @@ class IRISConversation:
 
         if cmd == "tools":
             # List all available tools
-            print("\n📦 Available Tools:\n")
+            print("\n[Tools] Available Tools:\n")
             tools = self.tool_registry.list_tools()
             for tool in tools:
                 print(f"  • {tool['name']}")
@@ -441,8 +442,15 @@ class IRISConversation:
 
         # Accumulate all tool calls requested across rounds
         all_tool_calls: list[ToolCall] = []
+        # Track every tool signature (tool_name + serialized arguments) requested
+        # so far in this user turn. This persists across ALL iterations of the
+        # AI -> tool -> AI loop, so a tool requested again in a later iteration
+        # is never executed twice.
+        executed_tool_signatures: set[str] = set()
+        # Prevent infinite tool call loops
+        max_tool_iterations = 20  # Safety limit to prevent infinite loops
 
-        while True:
+        for iteration in range(max_tool_iterations):
             # Use AIService to generate with tools
             response_content, tool_calls = await self.ai_service.generate_with_tools(
                 messages=self.memory_manager.get_messages_for_ai(),
@@ -455,28 +463,126 @@ class IRISConversation:
                 # This is the final response
                 return response_content, all_tool_calls
 
-            # Execute tool calls through orchestrator (respects max_tool_calls limit)
-            results = await self.orchestrator.execute_tool_calls(tool_calls)
+            # Check for repeated tool calls (same tool name and arguments) against
+            # every signature already requested in this user turn. A tool requested
+            # again in a later iteration is NOT executed again.
+            repeated_tool_calls = []
+            new_tool_calls = []
+            import json
+            for tool_call in tool_calls:
+                # Create a signature for tracking: tool_name + serialized arguments
+                try:
+                    args_str = json.dumps(tool_call.arguments, sort_keys=True)
+                except (TypeError, ValueError):
+                    # Fallback for non-serializable arguments
+                    args_str = str(tool_call.arguments)
+                tool_key = f"{tool_call.tool_name}:{args_str}"
+
+                if tool_key in executed_tool_signatures:
+                    repeated_tool_calls.append(tool_call)
+                else:
+                    executed_tool_signatures.add(tool_key)
+                    new_tool_calls.append(tool_call)
+
+            # If all requested tool calls were already executed earlier in this
+            # turn, stop the tool loop and generate the final response directly.
+            if not new_tool_calls:
+                # Build a valid history (never starts with role="tool") and
+                # generate the final answer WITHOUT tools.
+                valid_messages = self._get_valid_message_history_for_fallback()
+                final_response = await self.ai_service.generate(
+                    messages=valid_messages,
+                    temperature=0.7,
+                )
+                # Still accumulate the repeated calls in all_tool_calls for tracking
+                all_tool_calls.extend(repeated_tool_calls)
+                return final_response, all_tool_calls
+
+            # Execute new tool calls through orchestrator (respects max_tool_calls limit)
+            results = await self.orchestrator.execute_tool_calls(new_tool_calls)
+
+            # Add the assistant message containing these tool calls to memory
+            # FIRST, so tool results pair with it: assistant(tool_calls) -> tool
+            self.memory_manager.add_assistant_message(
+                response_content, tool_calls=new_tool_calls
+            )
 
             # Format results for conversation
             tool_messages = ToolOrchestrator.format_tool_results_for_messages(
-                tool_calls,
+                new_tool_calls,
                 results
             )
 
-            # Add tool results to memory
+            # Add tool results to memory after their assistant tool_calls message
             for message in tool_messages:
-                if message["role"] == "user":
-                    self.memory_manager.add_user_message(message["content"])
-                elif message["role"] == "assistant":
-                    self.memory_manager.add_assistant_message(message["content"])
-                elif message["role"] == "tool":
-                    # For tool messages, we need to add them directly to turns
-                    # since they don't fit the standard user/assistant pattern
+                if message["role"] == "tool":
                     self.memory_manager.context.turns.append(message)
 
             # Accumulate tool calls requested (including those that may have been limited)
-            all_tool_calls.extend(tool_calls)
+            all_tool_calls.extend(new_tool_calls)
+            # Also track repeated calls that we didn't execute
+            all_tool_calls.extend(repeated_tool_calls)
+
+            # If we've reached the max iterations, break to prevent infinite loop
+            if iteration == max_tool_iterations - 1:
+                break
+
+        # If we exited the loop due to max iterations, generate final response without tools
+        # First, ensure we have a valid message history that doesn't start with tool messages
+        valid_messages = self._get_valid_message_history_for_fallback()
+        final_response = await self.ai_service.generate(
+            messages=valid_messages,
+            temperature=0.7,
+        )
+        return final_response, all_tool_calls
+
+    def _get_valid_message_history_for_fallback(self) -> list[dict]:
+        """
+        Get a valid message history for fallback generation that doesn't start with orphaned tool messages.
+
+        Returns:
+            List of message dictionaries suitable for AI service consumption
+        """
+        messages = self.memory_manager.get_messages_for_ai()
+
+        # If messages start with tool messages, we need to trim them until we get to a non-tool message
+        # or until we have at least a user message
+        if messages:
+            # Find the first non-tool message index
+            first_non_tool_index = 0
+            for i, msg in enumerate(messages):
+                if msg.get("role") != "tool":
+                    first_non_tool_index = i
+                    break
+            else:
+                # All messages are tool messages - this shouldn't happen in normal operation
+                # but if it does, return just the last user message if we can find it
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        return [messages[i]]
+                # If no user message found, return empty list (will cause AI to use system prompt only)
+                return []
+
+            # If we found tool messages at the start, trim them
+            if first_non_tool_index > 0:
+                # Check if what we're trimming are orphaned tool messages (not paired with assistant tool_calls)
+                # For safety, we'll trim leading tool messages but ensure we keep at least a user message
+                trimmed_messages = messages[first_non_tool_index:]
+
+                # Ensure we have at least a user message in our history
+                has_user_message = any(msg.get("role") == "user" for msg in trimmed_messages)
+                if not has_user_message:
+                    # Look for user message in original messages
+                    for i in range(len(messages) - 1, -1, -1):
+                        if messages[i].get("role") == "user":
+                            # Return from that user message onward
+                            return messages[i:]
+                    # If no user message found, return what we have
+                    return trimmed_messages
+
+                return trimmed_messages
+
+        return messages
 
     def _create_intent_from_user_input(self, user_input: str) -> Intent:
         """
@@ -722,7 +828,7 @@ class IRISConversation:
 
     async def cleanup(self):
         """Clean up resources."""
-        print("Goodbye! 👋")
+        print("Goodbye!")
         if self.ai_service:
             await self.ai_service.close()
 

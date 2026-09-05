@@ -27,9 +27,9 @@ class MemoryManager:
         """Add a user message to memory."""
         self.context.add_user_message(content)
 
-    def add_assistant_message(self, content: str) -> None:
-        """Add an assistant message to memory."""
-        self.context.add_assistant_message(content)
+    def add_assistant_message(self, content: str, tool_calls: Optional[List[Any]] = None) -> None:
+        """Add an assistant message to memory, optionally with attached tool calls."""
+        self.context.add_assistant_message(content, tool_calls=tool_calls)
 
     def remove_last_turn(self) -> bool:
         """Remove the last conversation turn if exists.

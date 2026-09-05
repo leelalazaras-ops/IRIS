@@ -79,6 +79,8 @@ class TestOpenAICompatibleProvider:
         assert call_args[1]["json"]["messages"] == [{"role": "user", "content": "Hello"}]
         assert call_args[1]["json"]["temperature"] == 0.7
         assert call_args[1]["json"]["max_tokens"] == 100
+        # Verify stream is set to false for non-streaming response
+        assert call_args[1]["json"]["stream"] is False
 
         await provider.close()
 

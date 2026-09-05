@@ -5,6 +5,9 @@ Loads settings from environment variables with validation and sensible defaults.
 """
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 from dataclasses import dataclass
 from typing import Literal
 

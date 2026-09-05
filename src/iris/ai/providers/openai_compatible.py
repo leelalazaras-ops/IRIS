@@ -77,6 +77,7 @@ class OpenAICompatibleProvider(AIProvider):
             "model": self.model,
             "messages": request.messages,
             "temperature": request.temperature,
+            "stream": False,
         }
 
         if request.max_tokens is not None:
@@ -137,7 +138,9 @@ class OpenAICompatibleProvider(AIProvider):
                     )
 
                 message = choices[0].get("message", {})
-                content = message.get("content", "")
+                content = message.get("content")
+                if content is None:
+                    content = ""
 
                 # Check for tool calls in the response
                 tool_calls = None
