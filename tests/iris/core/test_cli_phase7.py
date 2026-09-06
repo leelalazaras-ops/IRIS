@@ -62,6 +62,55 @@ class TestCLIPhase7:
         assert isinstance(intent, Intent)
         assert intent.confidence < 0.5
 
+    # --- Calculate Expression Extraction Tests ---
+    def test_create_intent_calculate_simple_expression(self):
+        """Test _create_intent_from_user_input for calculate with simple expression."""
+        intent = self.conversation._create_intent_from_user_input("calculate 25 * 4")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "25 * 4"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "calculate 25 * 4"
+
+    def test_create_intent_compute_division(self):
+        """Test _create_intent_from_user_input for compute with division."""
+        intent = self.conversation._create_intent_from_user_input("compute 100 / 5")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "100 / 5"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "compute 100 / 5"
+
+    def test_create_intent_solve_addition(self):
+        """Test _create_intent_from_user_input for solve with addition."""
+        intent = self.conversation._create_intent_from_user_input("solve 12 + 8")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "12 + 8"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "solve 12 + 8"
+
+    def test_create_intent_what_is_with_parentheses(self):
+        """Test _create_intent_from_user_input for what is with parentheses."""
+        intent = self.conversation._create_intent_from_user_input("what is 7 * (3 + 2)")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "7 * (3 + 2)"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "what is 7 * (3 + 2)"
+
+    def test_create_intent_calculate_fallback_to_default(self):
+        """Test _create_intent_from_user_input for calculate falls back to default expression."""
+        intent = self.conversation._create_intent_from_user_input("calculate")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "2+2"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "calculate"
+
+    def test_create_intent_calculate_fallback_with_extra_words(self):
+        """Test _create_intent_from_user_input for calculate falls back when no meaningful expression."""
+        intent = self.conversation._create_intent_from_user_input("calculate please")
+        assert intent.action == "calculate"
+        assert intent.arguments.get("expression") == "2+2"
+        assert intent.confidence == 0.7
+        assert intent.original_request == "calculate please"
+
     # --- Confidence Threshold and Routing Tests ---
 
     @pytest.mark.asyncio

@@ -645,7 +645,7 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["write", "save", "put"]) or \
+        elif any(word in user_lower.split() for word in ["write", "save", "put"]) or \
              any(phrase in user_lower for phrase in ["create a file", "make a file"]):
             # Try to extract path and content from the user input
             path, content = self._extract_write_file_args(user_input)
@@ -671,11 +671,20 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["calculate", "compute", "math", "solve"]):
-            # Extract expression - simple version
+        elif any(word in user_lower for word in ["calculate", "compute", "math", "solve", "what is"]):
+            # Extract expression using simple deterministic pattern matching: look for trigger at start
+            trigger_phrases = ["what is", "calculate", "compute", "math", "solve"]
+            expression = None
+            for phrase in trigger_phrases:
+                if user_lower.startswith(phrase):
+                    expression = user_input[len(phrase):].strip()
+                    break
+            # If we didn't find a trigger at the start or the expression is empty or doesn't look like an expression (no digits), use fallback
+            if not expression or not any(c.isdigit() for c in expression):
+                expression = "2+2"
             return Intent(
                 action="calculate",
-                arguments={"expression": "2+2"},  # Placeholder
+                arguments={"expression": expression},
                 confidence=0.7,
                 original_request=user_input
             )
