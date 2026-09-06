@@ -618,7 +618,8 @@ class IRISConversation:
                 )
 
         elif any(word in user_lower for word in ["create", "make", "mkdir"]):
-            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input) else "new_folder"
+            extracted_path = self._extract_file_path(user_input)
+            path = extracted_path if extracted_path else "new_folder"
             return Intent(
                 action="create_directory",
                 arguments={"path": path},
@@ -627,7 +628,8 @@ class IRISConversation:
             )
 
         elif any(word in user_lower for word in ["list", "dir", "ls", "browse"]):
-            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input or "." in user_input) else "."
+            extracted_path = self._extract_file_path(user_input)
+            path = extracted_path if extracted_path else "."
             # Check if this is likely a genuine ls command or just coincidental match
             word_match = next((word for word in ["list", "dir", "ls", "browse"] if word in user_lower), None)
             confidence = 0.8
@@ -743,6 +745,7 @@ class IRISConversation:
             r'cat (\S+)',
             r'view (\S+)',
             r'list the files in (\S+)',
+            r'list directory (\S+)',
             r'list (\S+)',
             r'dir (\S+)',
             r'ls (\S+)',

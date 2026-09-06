@@ -111,6 +111,32 @@ class TestCLIPhase7:
         assert intent.confidence == 0.7
         assert intent.original_request == "calculate please"
 
+    # --- Regression Tests for Path Extraction (Phase 7.2C-4) ---
+    def test_create_intent_create_directory_projects_path(self):
+        """Test _create_intent_from_user_input for 'create directory projects' -> create_directory with path."""
+        intent = self.conversation._create_intent_from_user_input("create directory projects")
+        assert intent.action == "create_directory"
+        assert intent.arguments.get("path") == "projects"
+        assert intent.confidence == 0.8  # As per implementation for create keyword
+        assert intent.original_request == "create directory projects"
+
+    def test_create_intent_list_directory_projects_path(self):
+        """Test _create_intent_from_user_input for 'list directory projects' -> list_directory with path."""
+        intent = self.conversation._create_intent_from_user_input("list directory projects")
+        assert intent.action == "list_directory"
+        assert intent.arguments.get("path") == "projects"
+        # Confidence: list keyword with path -> 0.8 (we don't have special ls handling here)
+        assert intent.confidence == 0.8
+        assert intent.original_request == "list directory projects"
+
+    def test_create_intent_create_folder_named_test_data_path(self):
+        """Test _create_intent_from_user_input for 'create a folder named test_data' -> create_directory with path."""
+        intent = self.conversation._create_intent_from_user_input("create a folder named test_data")
+        assert intent.action == "create_directory"
+        assert intent.arguments.get("path") == "test_data"
+        assert intent.confidence == 0.8  # As per implementation for create keyword
+        assert intent.original_request == "create a folder named test_data"
+
     # --- Confidence Threshold and Routing Tests ---
 
     @pytest.mark.asyncio
