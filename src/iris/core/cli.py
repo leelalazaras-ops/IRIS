@@ -6,6 +6,7 @@ import asyncio
 import json
 import sys
 import signal
+import re
 from typing import Optional, List, Dict
 
 from iris.ai.service import AIService
@@ -616,6 +617,15 @@ class IRISConversation:
                     original_request=user_input
                 )
 
+        elif any(word in user_lower for word in ["create", "make", "mkdir"]):
+            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input) else "new_folder"
+            return Intent(
+                action="create_directory",
+                arguments={"path": path},
+                confidence=0.8,
+                original_request=user_input
+            )
+
         elif any(word in user_lower for word in ["list", "dir", "ls", "browse"]):
             path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input or "." in user_input) else "."
             # Check if this is likely a genuine ls command or just coincidental match
@@ -633,15 +643,6 @@ class IRISConversation:
                 action="list_directory",
                 arguments={"path": path},
                 confidence=confidence,
-                original_request=user_input
-            )
-
-        elif any(word in user_lower for word in ["create", "make", "mkdir"]):
-            path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input) else "new_folder"
-            return Intent(
-                action="create_directory",
-                arguments={"path": path},
-                confidence=0.8,
                 original_request=user_input
             )
 
@@ -725,22 +726,64 @@ class IRISConversation:
     def _extract_file_path(self, user_input: str) -> str:
         """
         Extract a file path from user input.
-        Very simple implementation - looks for common path patterns.
+        Improved implementation that looks for common path patterns and natural language constructs.
 
         Args:
             user_input: The user's input string
 
         Returns:
-            str: Extracted path or default
+            str: Extracted path or empty string if not found (caller should use fallback)
         """
-        # Look for patterns that might be file paths
+        # Define patterns for natural language path extraction
+        patterns = [
+            r'read the file (\S+)',
+            r'open (\S+)',
+            r'show (\S+)',
+            r'display (\S+)',
+            r'cat (\S+)',
+            r'view (\S+)',
+            r'list the files in (\S+)',
+            r'list (\S+)',
+            r'dir (\S+)',
+            r'ls (\S+)',
+            r'browse the (\S+) directory',
+            r'browse (\S+)',
+            r'create a directory called (\S+)',
+            r'make a directory called (\S+)',
+            r'create a folder named (\S+)',
+            r'make a folder named (\S+)',
+            r'create directory (\S+)',
+            r'make directory (\S+)',
+            r'create folder (\S+)',
+            r'make folder (\S+)',
+        ]
+
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, user_input, re.IGNORECASE)
+            if match:
+                path = match.group(1)
+                if path:  # Ensure we got a non-empty match
+                    return path
+
+        # Fallback to word-based path detection
         words = user_input.split()
         for word in words:
-            if "." in word and "/" in word or "\\" in word:
+            # Check for path-like patterns: contains dot and slash/backslash
+            if "." in word and ("/" in word or "\\" in word):
                 return word
-            if word.startswith("./") or word.startswith(".\\") or word.startswith("/") or len(word) > 1 and word[1] == ":":
+            # Check for backslash alone
+            if "\\" in word:
                 return word
-        return "."  # Default to current directory
+            # Check for path starters: ./, .\, /, or drive letter (e.g., C:)
+            if word.startswith("./") or word.startswith(".\\") or word.startswith("/") or (len(word) > 1 and word[1] == ":"):
+                return word
+            # Check for words with dot (file extension) but not just "." or ".."
+            if "." in word and word not in [".", ".."]:
+                return word
+
+        # If no path found, return empty string (caller will use fallback)
+        return ""
 
     def _extract_write_file_args(self, user_input: str) -> tuple[Optional[str], Optional[str]]:
         """
