@@ -39,13 +39,13 @@ class TestCLIPhase7:
 
     def test_create_intent_write_file_with_path_and_content(self):
         """Test _create_intent_from_user_input for write_file with path and content."""
-        # Based on implementation: write_file intent has fixed arguments and confidence 0.6
+        # Updated implementation: extracts path and content from input
         intent = self.conversation._create_intent_from_user_input("write hello to test.txt")
         assert intent.action == "write_file"
-        # The implementation sets fixed arguments (not based on input)
-        assert intent.arguments.get("path") == "new_file.txt"
-        assert intent.arguments.get("content") == "File content"
-        assert intent.confidence == 0.6  # As per implementation
+        # Should extract path="test.txt", content="hello"
+        assert intent.arguments.get("path") == "test.txt"
+        assert intent.arguments.get("content") == "hello"
+        assert intent.confidence == 0.8  # Higher confidence when extraction succeeds
 
     def test_create_intent_list_directory(self):
         """Test _create_intent_from_user_input for list_directory."""

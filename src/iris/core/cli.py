@@ -645,12 +645,21 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["write", "save", "put"]):
-            # Very simple extraction - in reality this would be more sophisticated
+        elif any(word in user_lower for word in ["write", "save", "put"]) or \
+             any(phrase in user_lower for phrase in ["create a file", "make a file"]):
+            # Try to extract path and content from the user input
+            path, content = self._extract_write_file_args(user_input)
+            if path is not None and content is not None:
+                arguments = {"path": path, "content": content}
+                confidence = 0.8
+            else:
+                # Fallback to hardcoded values
+                arguments = {"path": "new_file.txt", "content": "File content"}
+                confidence = 0.6
             return Intent(
                 action="write_file",
-                arguments={"path": "new_file.txt", "content": "File content"},
-                confidence=0.6,
+                arguments=arguments,
+                confidence=confidence,
                 original_request=user_input
             )
 
@@ -723,6 +732,47 @@ class IRISConversation:
             if word.startswith("./") or word.startswith(".\\") or word.startswith("/") or len(word) > 1 and word[1] == ":":
                 return word
         return "."  # Default to current directory
+
+    def _extract_write_file_args(self, user_input: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Extract path and content for a write_file intent from user input.
+        Uses simple deterministic pattern matching for common patterns.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            Tuple of (path, content). Returns (None, None) if extraction fails.
+        """
+        import re
+
+        # Normalize quotes: replace smart quotes with straight quotes for simplicity
+        normalized = user_input.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
+
+        # Define patterns to try, in order.
+        # Each pattern is a tuple (regex, function_to_extract_path_and_content_from_match)
+        # The function should return (path, content) from the match groups.
+        patterns = [
+            # Pattern: write <content> to <path>
+            (r'write\s+(.+?)\s+to\s+(\S+)', lambda m: (m.group(2).strip(), m.group(1).strip())),
+            # Pattern: save '<content>' in <path>
+            (r'save\s+["\'](.+?)["\']\s+in\s+(\S+)', lambda m: (m.group(2).strip(), m.group(1).strip())),
+            # Pattern: create a file called <path> containing <content>
+            (r'create a file called\s+(\S+)\s+containing\s+(.+)', lambda m: (m.group(1).strip(), m.group(2).strip())),
+            # Pattern: save <content> to <path> (without quotes)
+            (r'save\s+(.+?)\s+to\s+(\S+)', lambda m: (m.group(2).strip(), m.group(1).strip())),
+        ]
+
+        for pattern, extract_func in patterns:
+            match = re.search(pattern, normalized, re.IGNORECASE)
+            if match:
+                path, content = extract_func(match)
+                # Basic validation: path should not be empty and content should not be empty
+                if path and content:
+                    return path, content
+
+        # If none of the patterns matched, return (None, None) to trigger fallback.
+        return None, None
 
     async def _execute_action_step(self, step: ActionStep) -> ActionResult:
         """
