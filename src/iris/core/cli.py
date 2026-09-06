@@ -599,7 +599,7 @@ class IRISConversation:
         user_lower = user_input.lower().strip()
 
         # Map common phrases to intent actions
-        if any(word in user_lower for word in ["read", "show", "display", "cat"]):
+        if any(word in user_lower for word in ["read", "show", "display", "cat", "open", "view"]):
             if "." in user_lower or "/" in user_lower or "\\" in user_lower:
                 # Likely a file path mentioned
                 return Intent(
@@ -616,10 +616,10 @@ class IRISConversation:
                     original_request=user_input
                 )
 
-        elif any(word in user_lower for word in ["list", "dir", "ls"]):
+        elif any(word in user_lower for word in ["list", "dir", "ls", "browse"]):
             path = self._extract_file_path(user_input) if ("/" in user_input or "\\" in user_input or "." in user_input) else "."
             # Check if this is likely a genuine ls command or just coincidental match
-            word_match = next((word for word in ["list", "dir", "ls"] if word in user_lower), None)
+            word_match = next((word for word in ["list", "dir", "ls", "browse"] if word in user_lower), None)
             confidence = 0.8
             if word_match == "ls" and not (
                 user_lower.startswith("ls ") or
@@ -662,7 +662,7 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["calculate", "compute", "math"]):
+        elif any(word in user_lower for word in ["calculate", "compute", "math", "solve"]):
             # Extract expression - simple version
             return Intent(
                 action="calculate",
@@ -671,7 +671,7 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["system", "info", "spec"]):
+        elif any(word in user_lower for word in ["system", "info", "spec", "status"]):
             return Intent(
                 action="get_system_info",
                 arguments={},
@@ -679,7 +679,7 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["directory", "folder", "pwd"]):
+        elif any(word in user_lower for word in ["directory", "folder", "pwd", "where"]):
             return Intent(
                 action="get_current_directory",
                 arguments={},
@@ -687,7 +687,7 @@ class IRISConversation:
                 original_request=user_input
             )
 
-        elif any(word in user_lower for word in ["environment", "env", "variable"]):
+        elif any(word in user_lower for word in ["environment", "env", "variable", "vars"]):
             return Intent(
                 action="get_environment_info",
                 arguments={},
