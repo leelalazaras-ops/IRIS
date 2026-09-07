@@ -69,6 +69,17 @@ class SafetyClassifier:
             # Unknown tool - treat as blocked for safety
             return SafetyLevel.BLOCKED
 
+        # Argument-aware safety checks for specific tools
+        if tool_name in ["write_file", "create_directory"]:
+            path = arguments.get("path")
+            if path and isinstance(path, str):
+                # Case-insensitive check for sensitive paths
+                lower_path = path.lower()
+                sensitive_strings = ['windows', 'system32']
+                for s in sensitive_strings:
+                    if s in lower_path:
+                        return SafetyLevel.BLOCKED
+
         # Check against our predefined categories
         if tool_name in self._blocked_tools:
             return SafetyLevel.BLOCKED

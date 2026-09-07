@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, patch, Mock
 from iris.core.cli import IRISConversation
 from iris.intent.models import Intent
 from iris.planning.models import ActionPlan, ActionStep
+from iris.planning.planner import Planner
+from iris.safety.classifier import SafetyClassifier
 from iris.tools.base import ToolResult
 
 
@@ -1094,3 +1096,412 @@ class TestMultistepConfirmationFix:
                             # No pending state should be set since nothing required confirmation
                             assert self.conversation.pending_remaining_steps is None
                             assert self.conversation.pending_plan is None
+
+
+class TestArgumentAwareSafetyIntegration:
+    """Integration tests for argument-aware safety through the real IRIS pipeline (Phase 7.4C).
+
+    These tests verify that the argument-aware BLOCKED decision (Phase 7.4B) is
+    enforced end-to-end through the real IRISConversation pipeline - not just
+    in the SafetyClassifier unit tests. We use the REAL SafetyClassifier and
+    REAL Planner, mocking only the orchestrator and AI service (which would
+    otherwise hit network / disk).
+
+    Verification coverage:
+      1. write_file with sensitive Windows/System32 path reaches BLOCKED
+      2. create_directory with sensitive Windows/System32 path reaches BLOCKED
+      3. Normal write_file path still follows REQUIRES_CONFIRMATION
+      4. Normal create_directory path still follows REQUIRES_CONFIRMATION
+      5. In a multi-step plan, each step's arguments are classified independently
+      6. A BLOCKED step cannot execute even when other steps are SAFE
+      7. A BLOCKED step cannot be bypassed through /confirm
+      8. Existing single-step behavior remains unchanged
+    """
+
+    def setup_method(self):
+        """Set up a fresh conversation with REAL components (no mock safety / planner)."""
+        self.conversation = IRISConversation()
+        self.conversation.conversation_history = []
+        self.conversation.tools_enabled = True
+        # Ensure dry-run is OFF so we hit the BLOCKED / pending-remaining-steps path
+        self.conversation.dry_run_mode = False
+        # Sanity: confirm the real classifier is the arg-aware one
+        assert isinstance(self.conversation.safety_classifier, SafetyClassifier)
+        assert isinstance(self.conversation.planner, Planner)
+        # The real classifier must classify the arg-based patterns as BLOCKED.
+        # If this assertion fails, the unit-test only configuration was lost.
+        assert self.conversation.safety_classifier.is_blocked(
+            "write_file", {"path": "C:/Windows/bad.txt"}
+        ) is True
+        assert self.conversation.safety_classifier.is_blocked(
+            "create_directory", {"path": "C:/Windows/MyFolder"}
+        ) is True
+
+    # --- VERIFY 1: write_file + sensitive Windows path → BLOCKED through real pipeline ---
+
+    @pytest.mark.asyncio
+    async def test_write_file_to_windows_path_blocked_through_real_pipeline(self):
+        """write_file targeting C:/Windows/... must reach BLOCKED through the real CLI pipeline."""
+        # Force a high-confidence intent for write_file with a sensitive path.
+        # We bypass _create_intent_from_user_input (which would normalize the
+        # path) by patching it to return our exact intent.
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "C:/Windows/bad.txt", "content": "x"},
+                confidence=0.9,
+                original_request="write x to C:/Windows/bad.txt"
+            )
+            # Mock only the orchestrator (no real disk writes) and AI (no network).
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Blocked.")
+                    await self.conversation.handle_user_input(
+                        "write x to C:/Windows/bad.txt"
+                    )
+
+                    # BLOCKED step is NOT executed by the orchestrator
+                    mock_orch.execute_tool_calls.assert_not_called()
+                    # BLOCKED step is NOT added to pending_remaining_steps
+                    # (only confirmation-required steps go there)
+                    assert self.conversation.pending_remaining_steps is None
+                    assert self.conversation.pending_plan is None
+                    # A tool message marking it as blocked should be in memory
+                    tool_messages = [
+                        m for m in self.conversation.memory_manager.context.turns
+                        if m.get("role") == "tool"
+                    ]
+                    assert len(tool_messages) == 1
+                    assert "blocked" in tool_messages[0]["content"].lower()
+
+    # --- VERIFY 2: create_directory + sensitive Windows path → BLOCKED through real pipeline ---
+
+    @pytest.mark.asyncio
+    async def test_create_directory_to_windows_path_blocked_through_real_pipeline(self):
+        """create_directory targeting C:/Windows/... must reach BLOCKED through the real CLI pipeline."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="create_directory",
+                arguments={"path": "C:/Windows/MyFolder"},
+                confidence=0.9,
+                original_request="create directory C:/Windows/MyFolder"
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Blocked.")
+                    await self.conversation.handle_user_input(
+                        "create directory C:/Windows/MyFolder"
+                    )
+
+                    mock_orch.execute_tool_calls.assert_not_called()
+                    assert self.conversation.pending_remaining_steps is None
+                    assert self.conversation.pending_plan is None
+                    tool_messages = [
+                        m for m in self.conversation.memory_manager.context.turns
+                        if m.get("role") == "tool"
+                    ]
+                    assert len(tool_messages) == 1
+                    assert "blocked" in tool_messages[0]["content"].lower()
+
+    # --- VERIFY 3: Normal write_file path → REQUIRES_CONFIRMATION through real pipeline ---
+
+    @pytest.mark.asyncio
+    async def test_normal_write_file_still_requires_confirmation(self):
+        """A normal write_file path must still go through REQUIRES_CONFIRMATION, not BLOCKED."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "documents/notes.md", "content": "hi"},
+                confidence=0.9,
+                original_request="write hi to documents/notes.md"
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Done.")
+                    await self.conversation.handle_user_input(
+                        "write hi to documents/notes.md"
+                    )
+
+                    # REQUIRES_CONFIRMATION step is NOT executed immediately
+                    mock_orch.execute_tool_calls.assert_not_called()
+                    # It IS stored as pending awaiting /confirm
+                    assert self.conversation.pending_remaining_steps is not None
+                    assert len(self.conversation.pending_remaining_steps) == 1
+                    assert self.conversation.pending_remaining_steps[0].tool_name == "write_file"
+                    # The last assistant message should be a confirmation prompt
+                    last_assistant = self.conversation.memory_manager.context.turns[-1]
+                    assert "confirm" in last_assistant["content"].lower()
+
+    # --- VERIFY 4: Normal create_directory path → REQUIRES_CONFIRMATION through real pipeline ---
+
+    @pytest.mark.asyncio
+    async def test_normal_create_directory_still_requires_confirmation(self):
+        """A normal create_directory path must still go through REQUIRES_CONFIRMATION, not BLOCKED."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="create_directory",
+                arguments={"path": "projects"},
+                confidence=0.9,
+                original_request="create directory projects"
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Done.")
+                    await self.conversation.handle_user_input(
+                        "create directory projects"
+                    )
+
+                    mock_orch.execute_tool_calls.assert_not_called()
+                    assert self.conversation.pending_remaining_steps is not None
+                    assert len(self.conversation.pending_remaining_steps) == 1
+                    assert self.conversation.pending_remaining_steps[0].tool_name == "create_directory"
+                    last_assistant = self.conversation.memory_manager.context.turns[-1]
+                    assert "confirm" in last_assistant["content"].lower()
+
+    # --- VERIFY 5: Multi-step plan → each step's arguments classified independently ---
+
+    @pytest.mark.asyncio
+    async def test_multistep_classifies_each_step_independently(self):
+        """A multi-step plan with a Windows path step must classify that step BLOCKED
+        while leaving non-sensitive steps at their normal classification.
+
+        The real planner extracts the file path from the intent's
+        original_request when it detects a multi-step pattern. We craft an
+        original_request whose extracted file path contains "windows", so
+        the planner's write_file step is classified as BLOCKED. The first
+        step (create_directory) is REQUIRES_CONFIRMATION, which causes the
+        loop to return early with a confirmation prompt. The BLOCKED step
+        must not appear in pending_remaining_steps.
+        """
+        original_request = (
+            "create directory data and write a file C:/Windows/notes.txt containing hello"
+        )
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "C:/Windows/notes.txt", "content": "hello"},
+                confidence=0.8,
+                original_request=original_request
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Done.")
+                    await self.conversation.handle_user_input(original_request)
+
+                    # No safe steps in the plan, so the orchestrator must not run.
+                    mock_orch.execute_tool_calls.assert_not_called()
+                    # Pending state: the create_directory step is there (needs
+                    # confirmation). The BLOCKED write_file step must NOT be there.
+                    assert self.conversation.pending_remaining_steps is not None
+                    pending_tools = [s.tool_name for s in self.conversation.pending_remaining_steps]
+                    assert "create_directory" in pending_tools
+                    # The write_file step is BLOCKED - it must not be in pending.
+                    assert "write_file" not in pending_tools
+                    # Verify the BLOCKED step would not execute after /confirm
+                    with patch.object(
+                        self.conversation, '_execute_action_step', new_callable=AsyncMock
+                    ) as mock_execute:
+                        mock_execute.return_value = ToolResult(success=True, content="ok")
+                        await self.conversation.handle_tool_command("/confirm")
+                        # Only the create_directory step runs; write_file is filtered.
+                        assert mock_execute.call_count == 1
+                        assert mock_execute.call_args_list[0][0][0].tool_name == "create_directory"
+
+    # --- VERIFY 6: BLOCKED step cannot execute even when other steps are SAFE ---
+
+    @pytest.mark.asyncio
+    async def test_blocked_step_does_not_execute_when_other_steps_are_safe(self):
+        """In a plan [SAFE, BLOCKED], the orchestrator must only receive the SAFE step.
+        The BLOCKED step must be filtered out before tool execution."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "x", "content": "y"},
+                confidence=0.8,
+                original_request="custom"
+            )
+            with patch.object(self.conversation, 'planner') as mock_planner:
+                # Inject a plan with one SAFE step and one BLOCKED step.
+                # The real safety classifier will mark the write_file to
+                # C:/Windows/... as BLOCKED in the step's safety_classification,
+                # and the CLI's live classifier check will block it from execution.
+                safe_step = ActionStep(
+                    tool_name="calculate",
+                    arguments={"expression": "2+2"},
+                    description="Calculate 2+2"
+                )
+                blocked_step = ActionStep(
+                    tool_name="write_file",
+                    arguments={"path": "C:/Windows/bad.txt", "content": "x"},
+                    description="Write file C:/Windows/bad.txt"
+                )
+                mock_planner.plan.return_value = ActionPlan(steps=[safe_step, blocked_step])
+
+                with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                    mock_orch.execute_tool_calls = AsyncMock(return_value=[
+                        ToolResult(success=True, content="4")
+                    ])
+                    with patch.object(self.conversation, 'ai_service') as mock_ai:
+                        mock_ai.generate = AsyncMock(return_value="Done.")
+                        await self.conversation.handle_user_input("custom")
+
+                        # Orchestrator called exactly once (for the safe step only)
+                        mock_orch.execute_tool_calls.assert_called_once()
+                        call_args = mock_orch.execute_tool_calls.call_args
+                        tool_calls = call_args[0][0]
+                        # The blocked step must be filtered out
+                        executed_tool_names = [tc.tool_name for tc in tool_calls]
+                        assert "calculate" in executed_tool_names
+                        assert "write_file" not in executed_tool_names
+                        # No pending state (safe step ran, blocked was filtered)
+                        assert self.conversation.pending_remaining_steps is None
+
+    # --- VERIFY 7: BLOCKED step cannot be bypassed through /confirm ---
+
+    @pytest.mark.asyncio
+    async def test_blocked_step_cannot_be_bypassed_via_confirm(self):
+        """A BLOCKED step must never appear in pending_remaining_steps,
+        so /confirm cannot be used to bypass the block."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "C:/Windows/bad.txt", "content": "x"},
+                confidence=0.9,
+                original_request="write x to C:/Windows/bad.txt"
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Blocked.")
+                    await self.conversation.handle_user_input(
+                        "write x to C:/Windows/bad.txt"
+                    )
+
+                    # No pending state - blocked actions don't wait for /confirm
+                    assert self.conversation.pending_remaining_steps is None
+                    # Even if the user issues /confirm, it should be a no-op
+                    # (no pending action to confirm)
+                    with patch.object(
+                        self.conversation, '_execute_action_step', new_callable=AsyncMock
+                    ) as mock_execute:
+                        await self.conversation.handle_tool_command("/confirm")
+                        # No execution of any action
+                        mock_execute.assert_not_called()
+                    # Still no pending state
+                    assert self.conversation.pending_remaining_steps is None
+
+    # --- VERIFY 7b: BLOCKED step in mixed plan never reaches /confirm ---
+
+    @pytest.mark.asyncio
+    async def test_blocked_step_not_in_pending_even_when_other_steps_need_confirm(self):
+        """In a plan [CONFIRM, BLOCKED, CONFIRM], the BLOCKED step is filtered out.
+        /confirm executes the two CONFIRM steps only."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="write_file",
+                arguments={"path": "x", "content": "y"},
+                confidence=0.8,
+                original_request="custom"
+            )
+            with patch.object(self.conversation, 'planner') as mock_planner:
+                confirm_step_1 = ActionStep(
+                    tool_name="create_directory",
+                    arguments={"path": "safe_dir"},
+                    description="Create directory safe_dir"
+                )
+                blocked_step = ActionStep(
+                    tool_name="write_file",
+                    arguments={"path": "C:/Windows/bad.txt", "content": "x"},
+                    description="Write file C:/Windows/bad.txt"
+                )
+                confirm_step_2 = ActionStep(
+                    tool_name="create_directory",
+                    arguments={"path": "another_dir"},
+                    description="Create directory another_dir"
+                )
+                mock_planner.plan.return_value = ActionPlan(
+                    steps=[confirm_step_1, blocked_step, confirm_step_2]
+                )
+
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="Done.")
+                    result = await self.conversation.handle_user_input("custom")
+                    assert result is True
+
+                    # Pending state should contain the two confirmation steps,
+                    # but NOT the blocked step.
+                    assert self.conversation.pending_remaining_steps is not None
+                    pending_tools = [s.tool_name for s in self.conversation.pending_remaining_steps]
+                    # create_directory appears twice (the BLOCKED write_file is filtered)
+                    assert pending_tools.count("create_directory") == 2
+                    assert "write_file" not in pending_tools
+
+                    # /confirm executes only the 2 non-blocked steps
+                    with patch.object(
+                        self.conversation, '_execute_action_step', new_callable=AsyncMock
+                    ) as mock_execute:
+                        mock_execute.return_value = ToolResult(success=True, content="ok")
+                        await self.conversation.handle_tool_command("/confirm")
+                        assert mock_execute.call_count == 2
+                        executed = [c.args[0].tool_name for c in mock_execute.call_args_list]
+                        assert executed == ["create_directory", "create_directory"]
+                        # The blocked write_file was never executed
+                        assert "write_file" not in executed
+
+    # --- VERIFY 8: Existing single-step behavior remains unchanged ---
+
+    @pytest.mark.asyncio
+    async def test_single_step_safe_action_unchanged(self):
+        """A single safe action (calculate) must still execute through the orchestrator."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="calculate",
+                arguments={"expression": "2+2"},
+                confidence=0.8,
+                original_request="calculate 2+2"
+            )
+            with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                mock_orch.execute_tool_calls = AsyncMock(return_value=[
+                    ToolResult(success=True, content="4")
+                ])
+                with patch.object(self.conversation, 'ai_service') as mock_ai:
+                    mock_ai.generate = AsyncMock(return_value="The answer is 4.")
+                    await self.conversation.handle_user_input("calculate 2+2")
+
+                    # Single safe step executes normally
+                    mock_orch.execute_tool_calls.assert_called_once()
+                    # No pending state
+                    assert self.conversation.pending_remaining_steps is None
+
+    @pytest.mark.asyncio
+    async def test_single_step_unknown_tool_unchanged(self):
+        """An unknown tool (not in registry) must still be BLOCKED (default behavior preserved)."""
+        with patch.object(self.conversation, '_create_intent_from_user_input') as mock_create_intent:
+            mock_create_intent.return_value = Intent(
+                action="unknown_tool",
+                arguments={"path": "x"},
+                confidence=0.8,
+                original_request="custom"
+            )
+            with patch.object(self.conversation, 'planner') as mock_planner:
+                mock_planner.plan.return_value = ActionPlan(steps=[
+                    ActionStep(
+                        tool_name="unknown_tool",
+                        arguments={"path": "x"},
+                        description="Unknown tool"
+                    )
+                ])
+                with patch.object(self.conversation, 'orchestrator') as mock_orch:
+                    mock_orch.execute_tool_calls = AsyncMock(return_value=[])
+                    with patch.object(self.conversation, 'ai_service') as mock_ai:
+                        mock_ai.generate = AsyncMock(return_value="Blocked.")
+                        await self.conversation.handle_user_input("custom")
+
+                        # BLOCKED behavior preserved
+                        mock_orch.execute_tool_calls.assert_not_called()
+                        assert self.conversation.pending_remaining_steps is None

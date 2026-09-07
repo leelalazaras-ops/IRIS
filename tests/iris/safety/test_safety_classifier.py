@@ -106,3 +106,94 @@ class TestSafetyClassifier:
         # Unknown tool is blocked (not in registry)
         registry.has_tool.return_value = False
         assert classifier.is_blocked("unknown_tool", {}) is True
+
+    # --- Argument-Aware Safety Tests (Phase 7.4B) ---
+
+    def test_write_file_to_windows_path_is_blocked(self):
+        """write_file targeting a Windows/system path is BLOCKED."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        # Various sensitive path patterns
+        assert classifier.classify_action("write_file", {"path": "C:/Windows/System32/drivers/etc/hosts"}) == SafetyLevel.BLOCKED
+        assert classifier.classify_action("write_file", {"path": "/windows/file.txt"}) == SafetyLevel.BLOCKED
+        assert classifier.classify_action("write_file", {"path": "C:\\Windows\\notepad.exe"}) == SafetyLevel.BLOCKED
+        # Case insensitive
+        assert classifier.classify_action("write_file", {"path": "c:/WINDOWS/test.txt"}) == SafetyLevel.BLOCKED
+        assert classifier.classify_action("write_file", {"path": "C:/System32/config"}) == SafetyLevel.BLOCKED
+
+    def test_write_file_to_safe_path_unchanged(self):
+        """write_file to a normal path remains REQUIRES_CONFIRMATION."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        assert classifier.classify_action("write_file", {"path": "test.txt"}) == SafetyLevel.REQUIRES_CONFIRMATION
+        assert classifier.classify_action("write_file", {"path": "documents/notes.md"}) == SafetyLevel.REQUIRES_CONFIRMATION
+        assert classifier.classify_action("write_file", {"path": "/home/user/file.txt"}) == SafetyLevel.REQUIRES_CONFIRMATION
+
+    def test_create_directory_in_windows_is_blocked(self):
+        """create_directory targeting a Windows/system path is BLOCKED."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        assert classifier.classify_action("create_directory", {"path": "C:/Windows/MyFolder"}) == SafetyLevel.BLOCKED
+        assert classifier.classify_action("create_directory", {"path": "/system32/newdir"}) == SafetyLevel.BLOCKED
+
+    def test_create_directory_safe_path_unchanged(self):
+        """create_directory to a normal path remains REQUIRES_CONFIRMATION."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        assert classifier.classify_action("create_directory", {"path": "projects"}) == SafetyLevel.REQUIRES_CONFIRMATION
+        assert classifier.classify_action("create_directory", {"path": "/home/user/newdir"}) == SafetyLevel.REQUIRES_CONFIRMATION
+
+    def test_write_file_with_no_path_arg_unchanged(self):
+        """write_file with no path argument remains REQUIRES_CONFIRMATION."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        assert classifier.classify_action("write_file", {}) == SafetyLevel.REQUIRES_CONFIRMATION
+        assert classifier.classify_action("write_file", {"content": "hello"}) == SafetyLevel.REQUIRES_CONFIRMATION
+
+    def test_write_file_with_non_string_path_unchanged(self):
+        """write_file with non-string path remains REQUIRES_CONFIRMATION (no crash)."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        assert classifier.classify_action("write_file", {"path": None}) == SafetyLevel.REQUIRES_CONFIRMATION
+        assert classifier.classify_action("write_file", {"path": 123}) == SafetyLevel.REQUIRES_CONFIRMATION
+
+    def test_read_file_to_windows_path_remains_safe(self):
+        """read_file targeting Windows/system path is still SAFE (read is safe)."""
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        # Argument-aware check only applies to write_file/create_directory
+        assert classifier.classify_action("read_file", {"path": "C:/Windows/System32/config"}) == SafetyLevel.SAFE
+        assert classifier.classify_action("read_file", {"path": "/etc/passwd"}) == SafetyLevel.SAFE
+
+    def test_multistep_argument_aware_safety(self):
+        """Multi-step plan: each step is checked independently with its arguments."""
+        from iris.safety.classifier import SafetyClassifier
+        from iris.tools.registry import ToolRegistry
+        registry = Mock(spec=ToolRegistry)
+        registry.has_tool.return_value = True
+        classifier = SafetyClassifier(registry)
+
+        # Step 1: safe read
+        assert classifier.classify_action("read_file", {"path": "data.txt"}) == SafetyLevel.SAFE
+        # Step 2: write to safe path -> requires confirmation
+        assert classifier.classify_action("write_file", {"path": "output.txt", "content": "x"}) == SafetyLevel.REQUIRES_CONFIRMATION
+        # Step 3: write to windows path -> blocked
+        assert classifier.classify_action("write_file", {"path": "C:/Windows/bad.txt", "content": "x"}) == SafetyLevel.BLOCKED
+        # Step 4: create dir in safe path -> requires confirmation
+        assert classifier.classify_action("create_directory", {"path": "newdir"}) == SafetyLevel.REQUIRES_CONFIRMATION
+        # Step 5: calculate -> safe
+        assert classifier.classify_action("calculate", {"expression": "1+1"}) == SafetyLevel.SAFE

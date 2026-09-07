@@ -363,6 +363,13 @@ class IRISConversation:
                     # step AND all subsequent steps. We must not lose any step.
                     # Convert any collected tool_calls back to ActionStep
                     # representation and combine with remaining plan steps.
+                    # Note: BLOCKED steps (Phase 7.4B) must NOT be included in
+                    # the pending list - they cannot be bypassed via /confirm.
+                    # Any BLOCKED step that was already encountered in this loop
+                    # is skipped via `continue` and never reaches tool_calls;
+                    # we additionally filter plan.steps[i:] to exclude any
+                    # BLOCKED step that appears after the current confirmation
+                    # step so it cannot reach the orchestrator through /confirm.
                     pending: List[ActionStep] = []
                     for tc in tool_calls:
                         pending.append(ActionStep(
@@ -370,7 +377,13 @@ class IRISConversation:
                             arguments=tc.arguments,
                             description=f"Execute tool: {tc.tool_name}"
                         ))
-                    pending.extend(plan.steps[i:])
+                    for remaining_step in plan.steps[i:]:
+                        if self.safety_classifier.is_blocked(
+                            remaining_step.tool_name, remaining_step.arguments
+                        ):
+                            # Skip BLOCKED steps - they cannot be confirmed.
+                            continue
+                        pending.append(remaining_step)
                     self.pending_remaining_steps = pending
                     self.pending_plan = plan
                     return f"⚠️  Action requires confirmation: {step.description}\nType '/confirm' to proceed or '/cancel' to abort."
