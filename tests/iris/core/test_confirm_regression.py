@@ -1,7 +1,8 @@
 """
-Regression tests for the confirmation flow (Phase 7.5A).
+Regression tests for the confirmation flow (Phase 7.5A / 7.5B).
 
-Add tests ONLY - do not modify production code.
+Phase 7.5B: /confirm stops executing pending steps at the first failure
+(failure-safe confirmation). Prior successful steps remain executed.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -13,7 +14,7 @@ from iris.tools.base import ToolResult
 
 
 class TestConfirmRegression:
-    """Regression tests for /confirm and /cancel edge cases (Phase 7.5A)."""
+    """Regression tests for /confirm and /cancel edge cases (Phase 7.5A/7.5B)."""
 
     def setup_method(self):
         """Set up a fresh conversation for each test."""
@@ -188,8 +189,8 @@ class TestConfirmRegression:
     async def test_confirm_execution_failure_clears_pending(self):
         """When a pending step fails during /confirm, pending state is still cleared.
 
-        This documents CURRENT behavior (all steps attempted, state cleared
-        after the loop). Production behavior is NOT changed by this test.
+        Phase 7.5B: a failing step stops the /confirm loop; the failure is
+        reported normally and the pending state is cleared.
         """
         pending_step = self._make_step()
         self.conversation.pending_remaining_steps = [pending_step]
@@ -199,16 +200,16 @@ class TestConfirmRegression:
             mock_exec.return_value = ToolResult(success=False, content=None, error="Permission denied")
             await self.conversation.handle_tool_command("/confirm")
             mock_exec.assert_called_once_with(pending_step)
-            # Pending state is cleared even on failure (documents current behavior)
+            # Pending state is cleared even on failure
             assert self.conversation.pending_remaining_steps is None
             assert self.conversation.pending_plan is None
 
     @pytest.mark.asyncio
-    async def test_confirm_failure_continues_remaining_steps(self):
-        """When the FIRST pending step fails, later pending steps still execute (current behavior).
+    async def test_confirm_failure_stops_remaining_steps(self):
+        """When the FIRST pending step fails, subsequent pending steps must NOT execute.
 
-        Plan: [FAIL, OK] -> /confirm attempts both; documents the continuation
-        behavior for regression tracking. Production behavior is NOT changed.
+        Plan: [FAIL, OK] -> /confirm executes only the failing step, then
+        stops (Phase 7.5B failure-safe confirmation) and clears pending state.
         """
         fail_step = self._make_step(path="fail.txt")
         ok_step = self._make_step(path="ok.txt")
@@ -216,19 +217,49 @@ class TestConfirmRegression:
         self.conversation.pending_plan = ActionPlan(steps=[fail_step, ok_step])
 
         with patch.object(self.conversation, "_execute_action_step", new_callable=AsyncMock) as mock_exec:
-            # First call fails, second succeeds
             mock_exec.side_effect = [
                 ToolResult(success=False, content=None, error="Permission denied"),
                 ToolResult(success=True, content="ok"),
             ]
             await self.conversation.handle_tool_command("/confirm")
 
-            # Both steps were attempted (current behavior: continue after failure)
+            # Only the failing step was attempted; the later step never runs
+            assert mock_exec.call_count == 1
+            assert mock_exec.call_args_list[0].args[0] is fail_step
+            # Pending state is cleared after the failure
+            assert self.conversation.pending_remaining_steps is None
+            assert self.conversation.pending_plan is None
+
+    @pytest.mark.asyncio
+    async def test_confirm_failure_keeps_earlier_successful_steps(self):
+        """Steps that succeeded before a failure remain executed (no rollback).
+
+        Plan: [OK, FAIL, NEVER] -> /confirm executes OK and FAIL, then stops;
+        the third step never runs. The earlier success is not rolled back.
+        """
+        ok_step = self._make_step(path="ok.txt")
+        fail_step = self._make_step(path="fail.txt")
+        never_step = self._make_step(path="never.txt")
+        self.conversation.pending_remaining_steps = [ok_step, fail_step, never_step]
+        self.conversation.pending_plan = ActionPlan(
+            steps=[ok_step, fail_step, never_step]
+        )
+
+        with patch.object(self.conversation, "_execute_action_step", new_callable=AsyncMock) as mock_exec:
+            mock_exec.side_effect = [
+                ToolResult(success=True, content="ok"),
+                ToolResult(success=False, content=None, error="Permission denied"),
+                ToolResult(success=True, content="never"),
+            ]
+            await self.conversation.handle_tool_command("/confirm")
+
+            # Execution stopped at the failing step: [OK, FAIL] attempted, NEVER skipped
             assert mock_exec.call_count == 2
             called_paths = [c.args[0].arguments.get("path") for c in mock_exec.call_args_list]
-            assert called_paths == ["fail.txt", "ok.txt"]
-            # State cleared after the loop
+            assert called_paths == ["ok.txt", "fail.txt"]
+            # Pending state cleared
             assert self.conversation.pending_remaining_steps is None
+            assert self.conversation.pending_plan is None
 
 
 def _make_intent():

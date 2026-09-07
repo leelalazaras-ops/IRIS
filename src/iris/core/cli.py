@@ -260,11 +260,16 @@ class IRISConversation:
 
         elif cmd == "confirm":
             if self.pending_remaining_steps is not None:
-                # Execute all remaining steps in order
+                # Execute remaining steps in order; stop at the first failure
                 step_descriptions = [s.description for s in self.pending_remaining_steps]
                 print(f"\n✅ Confirming {len(self.pending_remaining_steps)} action(s): {', '.join(step_descriptions)}")
                 for step in self.pending_remaining_steps:
-                    await self._execute_action_step(step)
+                    result = await self._execute_action_step(step)
+                    if not result.success:
+                        # Failure-safe (Phase 7.5B): stop executing subsequent
+                        # steps. The failure itself has already been reported
+                        # normally by _execute_action_step via the result handler.
+                        break
                 self.pending_remaining_steps = None
                 self.pending_plan = None
             else:
