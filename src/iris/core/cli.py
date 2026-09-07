@@ -62,7 +62,7 @@ class IRISConversation:
 
         # Conversation state for Phase 7
         self.dry_run_mode = False
-        self.pending_confirmation: Optional[ActionStep] = None
+        self.pending_remaining_steps: Optional[List[ActionStep]] = None
         self.pending_plan: Optional[ActionPlan] = None
 
     @property
@@ -259,20 +259,23 @@ class IRISConversation:
             return True
 
         elif cmd == "confirm":
-            if self.pending_confirmation is not None:
-                print(f"\n✅ Confirming action: {self.pending_confirmation.description}")
-                # Execute the pending action
-                await self._execute_action_step(self.pending_confirmation)
-                self.pending_confirmation = None
+            if self.pending_remaining_steps is not None:
+                # Execute all remaining steps in order
+                step_descriptions = [s.description for s in self.pending_remaining_steps]
+                print(f"\n✅ Confirming {len(self.pending_remaining_steps)} action(s): {', '.join(step_descriptions)}")
+                for step in self.pending_remaining_steps:
+                    await self._execute_action_step(step)
+                self.pending_remaining_steps = None
                 self.pending_plan = None
             else:
                 print("\n❌ No pending action to confirm\n")
             return True
 
         elif cmd == "cancel":
-            if self.pending_confirmation is not None:
-                print(f"\n❌ Cancelling action: {self.pending_confirmation.description}")
-                self.pending_confirmation = None
+            if self.pending_remaining_steps is not None:
+                step_descriptions = [s.description for s in self.pending_remaining_steps]
+                print(f"\n❌ Cancelling action(s): {', '.join(step_descriptions)}")
+                self.pending_remaining_steps = None
                 self.pending_plan = None
             else:
                 print("\n❌ No pending action to cancel\n")
@@ -353,8 +356,22 @@ class IRISConversation:
                     from iris.tools.base import ToolResult
                     tool_result = await self._execute_action_step_dry_run(step)
                 else:
-                    # Store for confirmation and return early
-                    self.pending_confirmation = step
+                    # Store ALL steps that have not been executed yet.
+                    # This includes the SAFE steps that appeared earlier in
+                    # the plan (already collected as tool_calls but never
+                    # executed because we return early) AND the confirmation
+                    # step AND all subsequent steps. We must not lose any step.
+                    # Convert any collected tool_calls back to ActionStep
+                    # representation and combine with remaining plan steps.
+                    pending: List[ActionStep] = []
+                    for tc in tool_calls:
+                        pending.append(ActionStep(
+                            tool_name=tc.tool_name,
+                            arguments=tc.arguments,
+                            description=f"Execute tool: {tc.tool_name}"
+                        ))
+                    pending.extend(plan.steps[i:])
+                    self.pending_remaining_steps = pending
                     self.pending_plan = plan
                     return f"⚠️  Action requires confirmation: {step.description}\nType '/confirm' to proceed or '/cancel' to abort."
 
@@ -411,9 +428,10 @@ class IRISConversation:
         else:
             # No tool calls to execute (all were blocked or handled specially)
             # Generate response based on what happened
-            if self.pending_confirmation is not None:
+            if self.pending_remaining_steps is not None:
                 # This shouldn't happen because we returned early above, but just in case
-                return f"⚠️  Action requires confirmation: {self.pending_confirmation.description}\nType '/confirm' to proceed or '/cancel' to abort."
+                first_step = self.pending_remaining_steps[0]
+                return f"⚠️  Action requires confirmation: {first_step.description}\nType '/confirm' to proceed or '/cancel' to abort."
             else:
                 # All actions were blocked or we had dry run results
                 # Generate a summary response
