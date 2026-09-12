@@ -224,6 +224,7 @@ class IRISConversation:
             print("  /enable-tools          - Enable AI tool orchestration")
             print("  /disable-tools         - Disable AI tool orchestration")
             print("  /tool-status           - Show tool orchestration status")
+            print("  /status                - Show pending confirmation actions")
             print("  /help                  - Show this help message")
             print("  /dry-run               - Toggle dry-run mode (show plans without executing)")
             print("  /confirm               - Confirm pending action")
@@ -284,6 +285,19 @@ class IRISConversation:
                 self.pending_plan = None
             else:
                 print("\n❌ No pending action to cancel\n")
+            return True
+
+        elif cmd == "status":
+            # READ-ONLY status command for pending confirmation visibility
+            if self.pending_remaining_steps is None or len(self.pending_remaining_steps) == 0:
+                print("\nNo pending confirmation actions.\n")
+            else:
+                count = len(self.pending_remaining_steps)
+                word = "action" if count == 1 else "actions"
+                print(f"\n⚠️  Confirmation pending ({count} {word}):\n")
+                for i, step in enumerate(self.pending_remaining_steps, 1):
+                    print(f"  {i}. {step.description}")
+                print()  # Extra newline for consistency
             return True
 
         else:

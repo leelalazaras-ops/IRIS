@@ -1,8 +1,10 @@
 """
-Regression tests for the confirmation flow (Phase 7.5A / 7.5B).
+Regression tests for the confirmation flow (Phase 7.5A / 7.5B / 7.5C).
 
 Phase 7.5B: /confirm stops executing pending steps at the first failure
 (failure-safe confirmation). Prior successful steps remain executed.
+
+Phase 7.5C: /status is a read-only view of pending confirmation actions.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -260,6 +262,131 @@ class TestConfirmRegression:
             # Pending state cleared
             assert self.conversation.pending_remaining_steps is None
             assert self.conversation.pending_plan is None
+
+
+class TestStatusCommand:
+    """Regression tests for the /status command (Phase 7.5C)."""
+
+    def setup_method(self):
+        """Set up a fresh conversation for each test."""
+        self.conversation = IRISConversation()
+        self.conversation.conversation_history = []
+        self.conversation.tools_enabled = True
+        self.conversation.dry_run_mode = False
+
+    def _make_step(self, tool_name="write_file", path="test.txt", **kwargs):
+        """Helper to build an ActionStep."""
+        arguments = {"path": path}
+        if "content" in kwargs:
+            arguments["content"] = kwargs["content"]
+        return ActionStep(
+            tool_name=tool_name,
+            arguments=arguments,
+            description=f"{tool_name}: {path}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_no_pending_actions(self):
+        """When no pending actions exist, /status shows 'No pending confirmation actions.'"""
+        self.conversation.pending_remaining_steps = None
+        self.conversation.pending_plan = None
+
+        # Capture output
+        import io
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = buffer = io.StringIO()
+
+        await self.conversation.handle_tool_command("/status")
+
+        sys.stdout = old_stdout
+        output = buffer.getvalue()
+
+        assert "No pending confirmation actions." in output
+        # Should not crash and should return True
+        assert await self.conversation.handle_tool_command("/status") is True
+
+    @pytest.mark.asyncio
+    async def test_status_one_pending_action(self):
+        """With one pending action, /status shows count and description."""
+        pending_step = self._make_step()
+        self.conversation.pending_remaining_steps = [pending_step]
+        self.conversation.pending_plan = ActionPlan(steps=[pending_step])
+
+        # Capture output
+        import io
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = buffer = io.StringIO()
+
+        await self.conversation.handle_tool_command("/status")
+
+        sys.stdout = old_stdout
+        output = buffer.getvalue()
+
+        assert "⚠️  Confirmation pending (1 action)" in output
+        assert pending_step.description in output
+        assert await self.conversation.handle_tool_command("/status") is True
+
+    @pytest.mark.asyncio
+    async def test_status_multiple_pending_actions_in_order(self):
+        """With multiple pending actions, /status shows them in correct order."""
+        step1 = self._make_step(path="first.txt")
+        step2 = self._make_step(path="second.txt")
+        step3 = self._make_step(path="third.txt")
+        self.conversation.pending_remaining_steps = [step1, step2, step3]
+        self.conversation.pending_plan = ActionPlan(steps=[step1, step2, step3])
+
+        # Capture output
+        import io
+        import sys
+        old_stdout = sys.stdout
+        sys.stdout = buffer = io.StringIO()
+
+        await self.conversation.handle_tool_command("/status")
+
+        sys.stdout = old_stdout
+        output = buffer.getvalue()
+
+        assert "⚠️  Confirmation pending (3 actions)" in output
+        lines = output.strip().split('\n')
+        # Find the lines with step descriptions
+        step_lines = [line for line in lines if '. ' in line and ('write_file:' in line or 'first.txt' in line or 'second.txt' in line or 'third.txt' in line)]
+        assert len(step_lines) == 3
+        assert "1. write_file: first.txt" in step_lines[0] or "first.txt" in step_lines[0]
+        assert "2. write_file: second.txt" in step_lines[1] or "second.txt" in step_lines[1]
+        assert "3. write_file: third.txt" in step_lines[2] or "third.txt" in step_lines[2]
+        assert await self.conversation.handle_tool_command("/status") is True
+
+    @pytest.mark.asyncio
+    async def test_status_does_not_execute_pending_actions(self):
+        """Calling /status does not execute any of the pending actions."""
+        pending_step = self._make_step()
+        self.conversation.pending_remaining_steps = [pending_step]
+        self.conversation.pending_plan = ActionPlan(steps=[pending_step])
+
+        with patch.object(self.conversation, "_execute_action_step", new_callable=AsyncMock) as mock_exec:
+            await self.conversation.handle_tool_command("/status")
+            mock_exec.assert_not_called()
+            # State should remain unchanged
+            assert self.conversation.pending_remaining_steps == [pending_step]
+            assert self.conversation.pending_plan is not None
+
+    @pytest.mark.asyncio
+    async def test_status_does_not_clear_pending_state(self):
+        """Calling /status does not clear the pending state."""
+        pending_step = self._make_step()
+        self.conversation.pending_remaining_steps = [pending_step]
+        self.conversation.pending_plan = ActionPlan(steps=[pending_step])
+
+        await self.conversation.handle_tool_command("/status")
+        # State should remain unchanged
+        assert self.conversation.pending_remaining_steps == [pending_step]
+        assert self.conversation.pending_plan is not None
+        # Calling again should still show the same state
+        await self.conversation.handle_tool_command("/status")
+        assert self.conversation.pending_remaining_steps == [pending_step]
+        assert self.conversation.pending_plan is not None
 
 
 def _make_intent():
