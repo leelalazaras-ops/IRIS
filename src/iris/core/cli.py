@@ -30,6 +30,11 @@ from iris.tools.utility import (
     CalculateTool,
 )
 from iris.memory.manager import MemoryManager
+from iris.voice.voice_io import listen_for_speech
+try:
+    from iris.voice.voice_io import speak_text
+except ImportError:
+    speak_text = None
 
 # Phase 7: Intent & Action Engine imports
 from iris.intent.models import Intent
@@ -54,6 +59,7 @@ class IRISConversation:
             OrchestrationConfig(max_tool_calls=5, enable_tools=True)
         )
         self.tools_enabled = True  # Can be toggled by user
+        self.voice_mode = False  # Voice mode toggle, default OFF
 
         # Phase 7: Intent & Action Engine components
         self.safety_classifier = SafetyClassifier(self.tool_registry)
@@ -167,6 +173,15 @@ class IRISConversation:
             # Display response
             print(f"\nIRIS: {response}\n")
 
+            # Phase 8E: Text-to-speech integration
+            if self.voice_mode and speak_text is not None:
+                try:
+                    speak_text(response)
+                except Exception:
+                    # TTS failure must be handled safely - IRIS must not crash
+                    # The text response is still available in the terminal above
+                    pass
+
         except AIError as e:
             # Remove the user message from memory since we couldn't process it
             self.memory_manager.remove_last_turn()
@@ -229,6 +244,8 @@ class IRISConversation:
             print("  /dry-run               - Toggle dry-run mode (show plans without executing)")
             print("  /confirm               - Confirm pending action")
             print("  /cancel                - Cancel pending action")
+            print("  /voice-on              - Enable voice input mode")
+            print("  /voice-off             - Disable voice input mode")
             print("  exit, quit             - Exit IRIS")
             print()
             return True
@@ -257,6 +274,16 @@ class IRISConversation:
             self.dry_run_mode = not self.dry_run_mode
             status = "enabled" if self.dry_run_mode else "disabled"
             print(f"\n🔍 Dry-run mode {status}\n")
+            return True
+
+        elif cmd == "voice-on":
+            self.voice_mode = True
+            print("\n🔊 Voice mode enabled\n")
+            return True
+
+        elif cmd == "voice-off":
+            self.voice_mode = False
+            print("\n🔇 Voice mode disabled\n")
             return True
 
         elif cmd == "confirm":
@@ -960,10 +987,23 @@ class IRISConversation:
             while self.running:
                 try:
                     # Get user input
-                    user_input = input("IRIS> ")
-
-                    # Process input
-                    should_continue = await self.handle_user_input(user_input)
+                    if self.voice_mode:
+                        # Use voice input when voice mode is enabled
+                        print("IRIS> ", end="", flush=True)
+                        user_input = listen_for_speech()
+                        if user_input is None:
+                            # Speech recognition failed or no speech detected
+                            print(" [No speech detected]")
+                            should_continue = False  # Break loop after this iteration
+                        else:
+                            print(user_input)  # Echo the recognized input
+                            # Process input
+                            should_continue = await self.handle_user_input(user_input)
+                    else:
+                        # Use typed input when voice mode is disabled
+                        user_input = input("IRIS> ")
+                        # Process input
+                        should_continue = await self.handle_user_input(user_input)
 
                     if not should_continue:
                         break
