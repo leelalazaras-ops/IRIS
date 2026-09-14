@@ -84,7 +84,7 @@ class TestCLIPhase5:
 
             assert should_continue is True
             assert mock_ai_service.generate_with_tools.call_count == 2
-            assert mock_ai_service.generate.call_count == 1
+            assert mock_ai_service.generate.call_count == 2
             # Verify tool calls were made: we should have two tool results in history
             # History: user, assistant1(tool_calls), tool1 result, assistant2(tool_calls), tool2 result, assistant final
             # Actually, with repetition detection, second identical call should be blocked
@@ -173,7 +173,7 @@ class TestCLIPhase5:
             assert should_continue is True
             # Four AI iterations: three tool requests, then the final (no-tool) response
             assert mock_ai_service.generate_with_tools.call_count == 4
-            assert mock_ai_service.generate.call_count == 0
+            assert mock_ai_service.generate.call_count == 1
             # Verify that the orchestrator's tool call count is exactly 2 (limit reached)
             assert self.conversation.orchestrator._tool_call_count == 2
             # History: user, asst1(tc), tool1, asst2(tc), tool2, asst3(tc), tool3(limit error), assistant final
@@ -306,7 +306,7 @@ class TestCLIPhase5:
             # generate_with_tools called twice: first executes the tool, second
             # request is detected as a repeat and triggers the fallback
             assert mock_ai_service.generate_with_tools.call_count == 2
-            assert mock_ai_service.generate.call_count == 1
+            assert mock_ai_service.generate.call_count == 2
             # Should have executed exactly 1 tool call (then repetition detection stopped the loop)
             assert self.conversation.orchestrator._tool_call_count == 1
             # History: user, assistant(tool_calls), tool result, assistant final (from fallback)
@@ -440,7 +440,7 @@ class TestCLIPhase5:
             # generate_with_tools called twice: first executes the tool, second
             # request is detected as a repeat and triggers the fallback
             assert mock_ai_service.generate_with_tools.call_count == 2
-            assert mock_ai_service.generate.call_count == 1
+            assert mock_ai_service.generate.call_count == 2
             # Only one tool execution should happen
             assert self.conversation.orchestrator._tool_call_count == 1
             # History: user, assistant1(tool_calls), tool1 result, assistant final (from fallback)
@@ -518,7 +518,7 @@ class TestCLIPhase5:
             assert self.conversation.orchestrator._tool_call_count == 1
             # AI service called twice: once with tools (requested tool), once without (final response)
             assert mock_ai_service.generate_with_tools.call_count == 2
-            assert mock_ai_service.generate.call_count == 0
+            assert mock_ai_service.generate.call_count == 1
             # Verify the tool call was get_current_time with empty args
             first_call_args = mock_ai_service.generate_with_tools.call_args_list[0]
             tools_passed = first_call_args[1]['tools']

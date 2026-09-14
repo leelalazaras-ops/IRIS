@@ -38,6 +38,7 @@ except ImportError:
 
 # Phase 7: Intent & Action Engine imports
 from iris.intent.models import Intent
+from iris.intent.llm_classifier import classify_intent
 from iris.planning.planner import Planner
 from iris.planning.models import ActionPlan, ActionStep
 from iris.safety.classifier import SafetyClassifier, SafetyLevel
@@ -347,7 +348,11 @@ class IRISConversation:
             raise RuntimeError("AI service not initialized")
 
         # Try to interpret as intent for action execution
-        intent = self._create_intent_from_user_input(user_input.strip())
+        intent_or_coro = self._create_intent_from_user_input(user_input.strip())
+        if asyncio.iscoroutine(intent_or_coro):
+            intent = await intent_or_coro
+        else:
+            intent = intent_or_coro
 
         # Only proceed with action execution if confidence is high enough
         # For now, we'll use a threshold of 0.7
@@ -662,7 +667,43 @@ class IRISConversation:
 
         return messages
 
-    def _create_intent_from_user_input(self, user_input: str) -> Intent:
+    async def _create_intent_from_user_input(self, user_input: str) -> Intent:
+        """
+        Create an intent from user input using LLM classifier with fallback to rule-based detection.
+
+        Args:
+            user_input: The user's input string
+
+        Returns:
+            Intent: The interpreted intent
+        """
+        # If AI service is not available, fall back to rule-based
+        if not self.ai_service:
+            return self._create_intent_from_user_input_rule_based(user_input)
+
+        try:
+            # Use LLM classifier
+            classification = await classify_intent(user_input, self.ai_service)
+            action = classification.get("action")
+            confidence = classification.get("confidence", 0.0)
+            arguments = classification.get("arguments", {})
+
+            # If confidence is high enough, use the LLM result
+            if confidence >= 0.7:
+                return Intent(
+                    action=action,
+                    arguments=arguments,
+                    confidence=confidence,
+                    original_request=user_input
+                )
+            else:
+                # Fall back to rule-based for low confidence
+                return self._create_intent_from_user_input_rule_based(user_input)
+        except Exception:
+            # If any error occurs, fall back to rule-based
+            return self._create_intent_from_user_input_rule_based(user_input)
+
+    def _create_intent_from_user_input_rule_based(self, user_input: str) -> Intent:
         """
         Create an intent from user input.
         This is a simplified implementation - in a full system, this would use AI to interpret intent.
