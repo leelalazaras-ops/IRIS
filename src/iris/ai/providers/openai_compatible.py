@@ -5,12 +5,14 @@ Communicates with any OpenAI-compatible chat completion API.
 """
 
 import httpx
+from urllib.parse import urlparse
 from iris.ai.provider import AIProvider, AIRequest, AIResponse
 from iris.ai.exceptions import (
     AuthenticationError,
     TimeoutError,
     ResponseError,
     ProviderError,
+    ConfigurationError,
 )
 from iris.tools.orchestration import ToolCall
 
@@ -42,6 +44,15 @@ class OpenAICompatibleProvider(AIProvider):
             timeout: Request timeout in seconds
         """
         self.base_url = base_url.rstrip("/")
+
+        # Validate base_url format
+        parsed = urlparse(self.base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ConfigurationError(
+                f"Invalid base_url: {base_url}. Must be a valid URL with scheme and host.",
+                {"base_url": base_url}
+            )
+
         self.api_key = api_key
         self.model = model
         self.timeout = timeout

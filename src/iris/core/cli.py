@@ -682,8 +682,45 @@ class IRISConversation:
             return self._create_intent_from_user_input_rule_based(user_input)
 
         try:
-            # Use LLM classifier
-            classification = await classify_intent(user_input, self.ai_service)
+            # Get original user input for rule-based fallback and for the current input in the prompt
+            original_user_input = user_input
+            enhanced_input = original_user_input
+
+            # Build enhanced input for LLM only if context exists
+            # We need to determine what constitutes "history before current input"
+            turns = self.memory_manager.context.turns
+            history_for_context = []
+
+            if turns:
+                # Check if the last turn appears to be the current user input (already added to memory)
+                # This happens when called via process_user_input which adds user memory before calling this
+                last_turn = turns[-1]
+                if (last_turn.get('role') == 'user' and
+                    last_turn.get('content') == original_user_input):
+                    # Last turn is the current user input, so history is all turns except last
+                    history_for_context = turns[:-1]
+                else:
+                    # Last turn is not the current user input (e.g., direct test call or assistant turn)
+                    # So all turns are history before current input
+                    history_for_context = turns
+
+            # Take up to 2 of the most recent turns from history_for_context
+            if history_for_context:
+                # Take the last up to 2 turns (most recent first)
+                context_turns = history_for_context[-2:]
+                context_lines = []
+                for turn in context_turns:
+                    role = turn.get('role', 'unknown').capitalize()
+                    content = turn.get('content', '')
+                    # Truncate long content to prevent prompt bloat
+                    if len(content) > 100:
+                        content = content[:97] + "..."
+                    context_lines.append(f"{role}: {content}")
+                context_str = "\n".join(context_lines)
+                enhanced_input = f"Recent conversation:\n{context_str}\nCurrent input: {original_user_input}"
+
+            # Use LLM classifier with the enhanced input (if context available) or original (if not)
+            classification = await classify_intent(enhanced_input, self.ai_service)
             action = classification.get("action")
             confidence = classification.get("confidence", 0.0)
             arguments = classification.get("arguments", {})
@@ -694,14 +731,14 @@ class IRISConversation:
                     action=action,
                     arguments=arguments,
                     confidence=confidence,
-                    original_request=user_input
+                    original_request=original_user_input
                 )
             else:
-                # Fall back to rule-based for low confidence
-                return self._create_intent_from_user_input_rule_based(user_input)
+                # Fall back to rule-based for low confidence (using original input without context)
+                return self._create_intent_from_user_input_rule_based(original_user_input)
         except Exception:
-            # If any error occurs, fall back to rule-based
-            return self._create_intent_from_user_input_rule_based(user_input)
+            # If any error occurs, fall back to rule-based (using original input without context)
+            return self._create_intent_from_user_input_rule_based(original_user_input)
 
     def _create_intent_from_user_input_rule_based(self, user_input: str) -> Intent:
         """
@@ -835,11 +872,11 @@ class IRISConversation:
             )
 
         else:
-            # Default to a safe action - get current time
+            # Default to no action when intent cannot be determined
             return Intent(
-                action="get_current_time",
+                action="none",
                 arguments={},
-                confidence=0.3,
+                confidence=0.0,
                 original_request=user_input
             )
 

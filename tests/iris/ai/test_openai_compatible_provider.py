@@ -13,6 +13,7 @@ from iris.ai.exceptions import (
     TimeoutError,
     ResponseError,
     ProviderError,
+    ConfigurationError,
 )
 
 
@@ -345,3 +346,27 @@ class TestOpenAICompatibleProvider:
         await provider.close()
 
         provider._client.aclose.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_invalid_base_url(self):
+        """Test that invalid base_url raises ConfigurationError."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            OpenAICompatibleProvider(
+                base_url="not-a-valid-url",
+                api_key="test-key",
+                model="gpt-4",
+            )
+        assert "Invalid base_url" in str(exc_info.value)
+        assert "not-a-valid-url" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_base_url_without_scheme(self):
+        """Test that base_url without scheme raises ConfigurationError."""
+        with pytest.raises(ConfigurationError) as exc_info:
+            OpenAICompatibleProvider(
+                base_url="example.com/v1",
+                api_key="test-key",
+                model="gpt-4",
+            )
+        assert "Invalid base_url" in str(exc_info.value)
+        assert "example.com/v1" in str(exc_info.value)
