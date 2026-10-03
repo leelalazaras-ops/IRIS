@@ -19,6 +19,7 @@ class Intent:
         original_request: The original user input string
         timestamp: When the intent was created
         metadata: Additional provider-specific or processing metadata
+        source: The source of the intent ("llm" or "rule_based")
     """
     action: str
     arguments: Dict[str, Any] = field(default_factory=dict)
@@ -26,6 +27,7 @@ class Intent:
     original_request: str = ""
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    source: str = "rule_based"
 
     def __post_init__(self):
         """Validate intent parameters."""
@@ -33,3 +35,5 @@ class Intent:
             raise ValueError(f"confidence must be between 0.0 and 1.0, got {self.confidence}")
         if not self.action:
             raise ValueError("action cannot be empty")
+        if self.source not in ("llm", "rule_based"):
+            raise ValueError(f"source must be 'llm' or 'rule_based', got {self.source}")

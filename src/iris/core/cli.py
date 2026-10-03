@@ -354,12 +354,24 @@ class IRISConversation:
         else:
             intent = intent_or_coro
 
-        # Only proceed with action execution if confidence is high enough
-        # For now, we'll use a threshold of 0.7
-        if intent.confidence <= 0.7:
-            # Fall back to normal tool processing for low-confidence intents
-            response_content, _ = await self._process_with_tools()
-            return response_content
+        # Handle confidence-based routing for LLM vs rule-based intents
+        if intent.source == "llm":
+            if intent.confidence >= 0.70:
+                # High confidence LLM: proceed with planner/action
+                pass
+            elif intent.confidence >= 0.40:
+                # Medium confidence LLM: return clarification response
+                return "I'm not entirely sure I understand. Could you please clarify your request?"
+            else:
+                # Low confidence LLM: preserve existing Phase 11B fallback behavior
+                response_content, _ = await self._process_with_tools()
+                return response_content
+        else:  # rule_based
+            if intent.confidence <= 0.7:
+                # Rule-based: preserve existing Phase 11B behavior exactly
+                response_content, _ = await self._process_with_tools()
+                return response_content
+            # else: high confidence rule-based: proceed with planner/action
 
         # Create action plan from intent
         plan = self.planner.plan(intent)
@@ -725,17 +737,14 @@ class IRISConversation:
             confidence = classification.get("confidence", 0.0)
             arguments = classification.get("arguments", {})
 
-            # If confidence is high enough, use the LLM result
-            if confidence >= 0.7:
-                return Intent(
-                    action=action,
-                    arguments=arguments,
-                    confidence=confidence,
-                    original_request=original_user_input
-                )
-            else:
-                # Fall back to rule-based for low confidence (using original input without context)
-                return self._create_intent_from_user_input_rule_based(original_user_input)
+            # Use the LLM result (regardless of confidence) and mark as LLM origin
+            return Intent(
+                action=action,
+                arguments=arguments,
+                confidence=confidence,
+                original_request=original_user_input,
+                source="llm"
+            )
         except Exception:
             # If any error occurs, fall back to rule-based (using original input without context)
             return self._create_intent_from_user_input_rule_based(original_user_input)
