@@ -372,3 +372,109 @@ class TestToolOrchestrator:
         assert response == "AI response"
         assert tool_calls == []
         mock_ai_service.generate.assert_called_once_with(messages=messages)
+
+    # --- Phase 11C.2: centralized duplicate tool-call protection ---
+
+    @pytest.mark.asyncio
+    async def test_duplicate_identical_tool_call_executed_once_per_turn(self):
+        """An identical tool call (same tool + arguments) is executed only once."""
+        call_counter = {"count": 0}
+
+        class CountingTool(Tool):
+            @property
+            def name(self) -> str:
+                return "counting"
+
+            @property
+            def description(self) -> str:
+                return "Counts executions"
+
+            @property
+            def arguments(self) -> list[ToolArgument]:
+                return [ToolArgument(name="param", type=str, description="p", required=True)]
+
+            async def execute(self, **kwargs) -> ToolResult:
+                call_counter["count"] += 1
+                return ToolResult(success=True, content=f"exec-{call_counter['count']}")
+
+        self.registry.register(CountingTool())
+
+        tool_calls = [
+            ToolCall(id="call_1", tool_name="counting", arguments={"param": "value"}),
+            ToolCall(id="call_2", tool_name="counting", arguments={"param": "value"}),
+        ]
+
+        results = await self.orchestrator.execute_tool_calls(tool_calls)
+
+        # The tool was physically executed exactly once.
+        assert call_counter["count"] == 1
+        # First call succeeded, second was skipped.
+        assert results[0].success is True
+        assert results[0].content == "exec-1"
+        assert results[1].success is False
+        # The counter reflects only the executed call.
+        assert self.orchestrator._tool_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_duplicate_result_indicates_skipped(self):
+        """A skipped duplicate carries metadata identifying it as a duplicate."""
+        tool = MockTool("dup_tool", "A tool", result_content="ok")
+        self.registry.register(tool)
+
+        tool_calls = [
+            ToolCall(id="call_1", tool_name="dup_tool", arguments={"param": "a"}),
+            ToolCall(id="call_2", tool_name="dup_tool", arguments={"param": "a"}),
+        ]
+
+        results = await self.orchestrator.execute_tool_calls(tool_calls)
+
+        assert results[1].success is False
+        assert "duplicate" in results[1].error.lower()
+        assert "skipped" in results[1].error.lower()
+        assert results[1].metadata.get("duplicate") is True
+        assert results[1].metadata.get("tool_call_id") == "call_2"
+
+    @pytest.mark.asyncio
+    async def test_reset_call_count_allows_duplicate_on_new_turn(self):
+        """After reset_call_count(), an identical call executes again on a new turn."""
+        tool = MockTool("reset_tool", "A tool", result_content="ok")
+        self.registry.register(tool)
+
+        first = [
+            ToolCall(id="call_1", tool_name="reset_tool", arguments={"param": "a"})
+        ]
+        second = [
+            ToolCall(id="call_2", tool_name="reset_tool", arguments={"param": "a"})
+        ]
+
+        # First turn: executes normally.
+        results_first = await self.orchestrator.execute_tool_calls(first)
+        assert results_first[0].success is True
+        assert self.orchestrator._tool_call_count == 1
+
+        # Reset per-turn state (start of a new user turn).
+        self.orchestrator.reset_call_count()
+
+        # Second turn: the identical call must execute again, not be skipped.
+        results_second = await self.orchestrator.execute_tool_calls(second)
+        assert results_second[0].success is True
+        assert self.orchestrator._tool_call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_distinct_arguments_are_not_deduplicated(self):
+        """Calls to the same tool with different arguments are both executed."""
+        tool = MockTool("arg_tool", "A tool", result_content="ok")
+        self.registry.register(tool)
+
+        tool_calls = [
+            ToolCall(id="call_1", tool_name="arg_tool", arguments={"param": "a"}),
+            ToolCall(id="call_2", tool_name="arg_tool", arguments={"param": "b"}),
+        ]
+
+        results = await self.orchestrator.execute_tool_calls(tool_calls)
+
+        assert len(results) == 2
+        assert all(r.success for r in results)
+        assert self.orchestrator._tool_call_count == 2
+
+    

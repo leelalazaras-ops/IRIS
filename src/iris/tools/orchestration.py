@@ -6,6 +6,7 @@ request tool execution in a safe, controlled manner. All tool execution
 goes through the existing Phase 3 ToolRegistry with full validation.
 """
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional, Any, TYPE_CHECKING
 from iris.tools.registry import ToolRegistry
@@ -91,10 +92,39 @@ class ToolOrchestrator:
         self.registry = registry
         self.config = config or OrchestrationConfig()
         self._tool_call_count = 0
+        # Phase 11C.2: Track signatures of tool calls already executed this turn.
+        # A signature is the tool name plus deterministically serialized arguments,
+        # matching the concept already used by cli.py to avoid redundant calls.
+        self._executed_signatures: set[str] = set()
 
     def reset_call_count(self) -> None:
         """Reset the tool call counter (call at start of each user turn)."""
         self._tool_call_count = 0
+        # Phase 11C.2: Also clear the set of executed tool signatures so the same
+        # tool call may legitimately execute again on a new turn.
+        self._executed_signatures = set()
+
+    @staticmethod
+    def _tool_call_signature(tool_call: "ToolCall") -> str:
+        """
+        Build a deterministic signature for a tool call.
+
+        The signature combines the tool name with the arguments serialized in a
+        canonical (sorted-key) form so that two calls are considered identical
+        only when they target the same tool with byte-identical arguments.
+
+        Args:
+            tool_call: The ToolCall to fingerprint.
+
+        Returns:
+            A stable string signature for the tool call.
+        """
+        try:
+            args_str = json.dumps(tool_call.arguments, sort_keys=True)
+        except (TypeError, ValueError):
+            # Fallback for non-serializable arguments (same behavior as cli.py).
+            args_str = str(tool_call.arguments)
+        return f"{tool_call.tool_name}:{args_str}"
 
     async def execute_tool_calls(
         self,
@@ -129,6 +159,25 @@ class ToolOrchestrator:
                 ))
                 continue
 
+            # Phase 11C.2: Skip duplicate tool calls already executed this turn.
+            # Only exact tool-name + exact-arguments duplicates are skipped.
+            signature = self._tool_call_signature(tool_call)
+            if signature in self._executed_signatures:
+                results.append(ToolResult(
+                    success=False,
+                    content=None,
+                    error=(
+                        f"Duplicate tool call skipped: tool '{tool_call.tool_name}' "
+                        f"with these arguments was already executed this turn"
+                    ),
+                    metadata={
+                        "tool_call_id": tool_call.id,
+                        "duplicate": True,
+                        "duplicate_signature": signature,
+                    }
+                ))
+                continue
+
             # Validate ToolCall structure (treat as untrusted)
             try:
                 # Basic structure validation
@@ -160,6 +209,10 @@ class ToolOrchestrator:
                 # Add tool call ID to result metadata
                 result.metadata["tool_call_id"] = tool_call.id
                 results.append(result)
+
+                # Record the signature so an identical call later this turn is
+                # skipped instead of executed again.
+                self._executed_signatures.add(signature)
 
                 # Increment counter only for executed calls
                 self._tool_call_count += 1
