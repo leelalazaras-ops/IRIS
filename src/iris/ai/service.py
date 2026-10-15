@@ -13,6 +13,14 @@ from iris.ai.exceptions import ConfigurationError
 from iris.tools.orchestration import ToolCall
 
 
+PERSONALITY_PROMPT = (
+    "You are IRIS — a capable, calm, concise, professional assistant with a slightly futuristic tone.\n"
+    "Prefer direct answers and actionable instructions. Avoid repetitive greetings, unnecessary verbosity, and generic filler.\n"
+    "Use conversation context when relevant without repeating the entire conversation.\n"
+    "Keep answers grounded in available information; never invent completed actions, telemetry, or results."
+)
+
+
 class AIService:
     """
     High-level AI service for IRIS.
@@ -62,6 +70,26 @@ class AIService:
 
         return self._provider
 
+    def _prepare_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        """
+        Prepares messages by ensuring the PERSONALITY_PROMPT is applied exactly once.
+        Does not mutate the original messages list or dictionaries.
+        """
+        prepared = [msg.copy() for msg in messages]
+
+        if not prepared:
+            return [{"role": "system", "content": PERSONALITY_PROMPT}]
+
+        if prepared[0].get("role") != "system":
+            prepared.insert(0, {"role": "system", "content": PERSONALITY_PROMPT})
+        else:
+            content = prepared[0].get("content", "")
+            if not content.startswith(PERSONALITY_PROMPT):
+                separator = "\n" if content else ""
+                prepared[0]["content"] = f"{PERSONALITY_PROMPT}{separator}{content}"
+
+        return prepared
+
     async def generate(
         self,
         messages: list[dict[str, str]],
@@ -82,6 +110,8 @@ class AIService:
         Raises:
             AIError: If generation fails
         """
+        messages = self._prepare_messages(messages)
+
         request = AIRequest(
             messages=messages,
             temperature=temperature,
@@ -113,6 +143,7 @@ class AIService:
         Raises:
             AIError: If generation fails
         """
+        messages = self._prepare_messages(messages)
         request = AIRequest(
             messages=messages,
             temperature=temperature,
@@ -144,6 +175,7 @@ class AIService:
         Raises:
             AIError: If generation fails
         """
+        messages = self._prepare_messages(messages)
         request = AIRequest(
             messages=messages,
             temperature=temperature,
