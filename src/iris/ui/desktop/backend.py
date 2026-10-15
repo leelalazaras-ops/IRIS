@@ -53,9 +53,8 @@ class IrisWorker(QObject):
         """Stop the worker thread."""
         self._stop_event.set()
 
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-
+        # Let the worker finish its current loop iteration and drain
+        # pending coroutines before cleanup closes the event loop.
         if self._thread:
             self._thread.join(timeout=5.0)
 
