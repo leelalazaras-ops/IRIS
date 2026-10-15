@@ -737,7 +737,19 @@ class IRISConversation:
             confidence = classification.get("confidence", 0.0)
             arguments = classification.get("arguments", {})
 
-            # Use the LLM result (regardless of confidence) and mark as LLM origin
+            # Phase 11C.3: Integrate LLM classification with the deterministic
+            # rule-based detector. If the LLM did not identify an actionable
+            # intent (action == "none") or is below the Phase 11C.1
+            # high-confidence threshold (0.70), fall back to rule-based
+            # detection using the ORIGINAL user input - never the
+            # context-enhanced classifier input, so conversation history
+            # cannot cause false keyword matches. This keeps the planner
+            # from being invoked for purely conversational requests and
+            # ensures it receives the best available intent.
+            if action == "none" or confidence < 0.70:
+                return self._create_intent_from_user_input_rule_based(original_user_input)
+
+            # Use the LLM result and mark as LLM origin
             return Intent(
                 action=action,
                 arguments=arguments,
