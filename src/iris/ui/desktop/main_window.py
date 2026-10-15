@@ -66,11 +66,14 @@ class IrisMainWindow(QMainWindow):
         # Sidebar status placeholders
         # We'll handle VOICE specially with a toggle button
         status_labels = [
-            ("SYSTEM STATUS", "N/A"),
-            ("AI STATUS", "N/A"),
-            ("VOICE", None),   # Indicates we need a toggle button
-            ("SECURITY", "N/A"),
-            ("TOOLS", "N/A"),
+           ("SYSTEM STATUS", "N/A"),
+    ("AI STATUS", "N/A"),
+    ("AI ENGINE", "N/A"),
+    ("VOICE", None),
+    ("SECURITY", "N/A"),
+    ("ACTION STATE", "IDLE"),
+    ("TOOLS", "N/A"),
+    ("DRY RUN", "OFF"),
         ]
         for title, value in status_labels:
             frame = QFrame()
