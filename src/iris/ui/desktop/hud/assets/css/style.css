@@ -564,3 +564,60 @@ body.reduced-motion .event-row { animation: none; }
 ::-webkit-scrollbar-thumb { background: rgba(34, 211, 238, 0.18); border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(34, 211, 238, 0.3); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ------------------------------------------------ map panel */
+.map-wrap { position: relative; flex: 1; min-height: 380px; }
+.map-canvas { position: absolute; inset: 0; border-radius: 4px; }
+.map-viewport {
+  position: absolute; inset: 0;
+  overflow: hidden;
+  cursor: grab;
+  background: repeating-linear-gradient(
+    45deg, rgba(34, 211, 238, 0.03) 0 12px, transparent 12px 24px);
+  border-radius: 4px;
+}
+.map-viewport.map-grabbing { cursor: grabbing; }
+.map-layer { position: absolute; top: 0; left: 0; will-change: transform; }
+.map-tile {
+  position: absolute;
+  image-rendering: auto;
+  filter: saturate(0.55) brightness(0.72) contrast(1.05); /* dark HUD tint */
+  pointer-events: none;
+}
+.map-tile-loading { opacity: 0.3; }
+.map-tile-ph {
+  background: repeating-linear-gradient(
+    45deg, rgba(138, 151, 163, 0.16) 0 10px, rgba(138, 151, 163, 0.05) 10px 20px);
+}
+.map-crosshair {
+  position: absolute; left: 50%; top: 50%; width: 26px; height: 26px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  opacity: 0.75;
+}
+.map-crosshair::before, .map-crosshair::after {
+  content: ""; position: absolute; background: var(--cyan);
+}
+.map-crosshair::before { left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-50%); }
+.map-crosshair::after { top: 50%; left: 0; right: 0; height: 1px; transform: translateY(-50%); }
+.map-controls { position: absolute; right: 10px; bottom: 10px; display: flex; flex-direction: column; gap: 4px; z-index: 3; }
+.map-btn { width: 30px; height: 30px; padding: 0; font-size: 15px; line-height: 1; z-index: 3; }
+.map-status {
+  position: absolute; top: 8px; left: 10px; right: 10px; z-index: 3;
+  font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em;
+  padding: 5px 9px; border-radius: 3px;
+  background: rgba(6, 10, 14, 0.88);
+  border: 1px solid var(--line);
+  color: var(--text);
+}
+.map-status.map-ok { border-color: rgba(52, 211, 153, 0.35); color: var(--good); }
+.map-status.map-warn { border-color: rgba(251, 191, 36, 0.45); color: var(--warn); }
+.map-status.map-bad { border-color: rgba(248, 113, 113, 0.45); color: var(--err); }
+.map-foot {
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 9px; letter-spacing: 0.1em;
+  color: var(--text-dim); padding: 6px 0 2px;
+}
+.map-foot a { color: var(--cyan); text-decoration: none; }
+.map-foot a:hover { text-decoration: underline; }
+body.reduced-motion .map-layer { will-change: auto; }

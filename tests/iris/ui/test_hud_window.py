@@ -42,6 +42,16 @@ def worker():
     return IrisWorker()
 
 
+def test_map_view_assets_and_attribution():
+    """Map view ships as real markup; attribution is enforced by the module."""
+    html = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
+    assert "view-map" in html
+    assert "map-attrib" in html  # attribution slot exists (link injected by map.js)
+    js = (ASSETS_DIR / "js" / "map.js").read_text(encoding="utf-8")
+    assert "tile.openstreetmap.org" in js
+    assert "openstreetmap.org/copyright" in js
+
+
 def test_local_assets_exist_and_reference_no_cdn():
     index = ASSETS_DIR / "index.html"
     assert index.exists()
@@ -49,9 +59,9 @@ def test_local_assets_exist_and_reference_no_cdn():
     # Essential assets must not depend on CDNs or the internet.
     assert "https://" not in html
     assert "http://" not in html
-    for ref in ("js/qwebchannel.js", "js/core3d.js", "js/app.js", "css/style.css"):
+    for ref in ("js/qwebchannel.js", "js/core3d.js", "js/app.js", "js/map.js", "css/style.css"):
         assert ref in html
-        assert (ASSETS_DIR / ref).exists()
+        assert (ASSETS_DIR / ref).exists(), ref
 
 
 def test_construct_hud_window(qapp, worker):
@@ -59,14 +69,17 @@ def test_construct_hud_window(qapp, worker):
     try:
         assert window.windowTitle() == "IRIS Command Center"
         assert window.centralWidget() is not None
-        # worker/bridge wired: telemetry snapshotting is driven by timers we control
-        window._poll_telemetry()
-        window._poll_security()
+        # collector thread drives snapshots; UI thread never blocks on psutil
+        assert window._collector.is_alive()
+        # manual refresh paths still work without touching the collector
+        window._bridge.refresh_telemetry_now()
+        window._bridge._cmd_refresh_security({})
         window._push_history()
         window._push_diagnostics()
         assert window.webgl_detail in ("UNKNOWN",) or window.webgl_detail
     finally:
         window.close()
+    assert not window._collector.is_alive()
 
 
 def test_close_stops_workers_and_timers(qapp, worker):
@@ -79,12 +92,13 @@ def test_close_stops_workers_and_timers(qapp, worker):
         assert not timer.isActive()
 
 
-def test_preferences_apply_to_timers(qapp, worker):
+def test_preferences_apply_to_collector(qapp, worker):
     window = IrisHudWindow(worker)
     try:
         window.apply_preferences(1000, 3000)
-        assert window._telemetry_timer.interval() == 1000
-        assert window._security_timer.interval() == 3000
+        telemetry_ms, security_ms = window._collector.intervals_ms
+        assert telemetry_ms == 1000
+        assert security_ms == 3000
     finally:
         window.close()
 

@@ -31,6 +31,7 @@
 
   let bridge = null;
   let core = null;
+  let mapCtl = null;
   const state = {
     backend: {},
     tools: [],
@@ -92,13 +93,14 @@
     core = new window.IrisCore(canvas, (mode, info) => {
       if (mode === "2d") {
         $("fallback-banner").classList.remove("hidden");
-        bridge && bridge.invoke("report_webgl", JSON.stringify({ available: false, detail: "2D fallback" }));
+        bridge && bridge.invoke("report_webgl", JSON.stringify({ available: false, detail: "2D fallback: " + String(info || "").slice(0, 60) }));
       } else {
         $("fallback-banner").classList.add("hidden");
         bridge && bridge.invoke("report_webgl", JSON.stringify({ available: true, detail: mode + ": " + String(info || "").slice(0, 60) }));
       }
       syncCoreState();
     });
+    core.setReducedMotion(PREFS.reduced);
     core.start();
   }
 
@@ -276,6 +278,7 @@
       document.body.classList.toggle("reduced-motion", v);
       $("pref-motion").checked = v;
       $("pref-motion2").checked = v;
+      if (core && core.setReducedMotion) core.setReducedMotion(v);
     };
     $("pref-motion").addEventListener("change", (e) => motion(e.target.checked));
     $("pref-motion2").addEventListener("change", (e) => motion(e.target.checked));
@@ -301,7 +304,7 @@
       const mod = e.ctrlKey || e.metaKey;
       if (mod && (e.key === "k" || e.key === "K")) { e.preventDefault(); openPalette(); return; }
       if (!mod) return;
-      const views = ["core", "console", "telemetry", "security", "events", "diagnostics"];
+      const views = ["core", "console", "telemetry", "security", "events", "diagnostics", "map"];
       const n = Number(e.key);
       if (n >= 1 && n <= views.length) { e.preventDefault(); switchView(views[n - 1]); }
       if (e.key === "e" || e.key === "E") { e.preventDefault(); doExport("md"); }
@@ -339,6 +342,17 @@
       v.classList.remove("active"));
     const view = $("view-" + name);
     if (view) view.classList.add("active");
+    // Core rAF loop only runs while its view is actually visible.
+    if (core && core.setPaused) core.setPaused(name !== "core");
+  // The map is lazy: first open initialises tiles (no fetch before that).
+      if (name === "map" && !mapCtl && window.IrisMap) {
+        mapCtl = window.IrisMap.create($("map-canvas"));
+        $("map-recenter").addEventListener("click", () => mapCtl && mapCtl.recenter(), { once: false });
+        $("map-reload").addEventListener("click", () => mapCtl && mapCtl.reload(), { once: false });
+      } else if (name === "map" && mapCtl) {
+        // re-run layout after the panel becomes visible
+        mapCtl.focus && mapCtl.focus();
+      }
     if (name === "diagnostics" && bridge) bridge.invoke("get_diagnostics", "{}");
   }
 
@@ -410,6 +424,24 @@
 
   // ------------------------------------------------------------ telemetry
 
+  // Text-content diff cache: only write when the value actually changed.
+  const _textCache = new Map();
+  function setText(id, value) {
+    const el = $(id);
+    if (!el) return;
+    if (_textCache.get(id) === value) return;
+    _textCache.set(id, value);
+    el.textContent = value;
+  }
+  // innerHTML diff cache for tables/lists: DOM untouched on no-change.
+  const _htmlCache = new Map();
+  function setHtml(id, value) {
+    const el = $(id);
+    if (!el) return;
+    if (_htmlCache.get(id) === value) return;
+    _htmlCache.set(id, value);
+    el.innerHTML = value;
+  }
   function renderTelemetry(tel) {
     if (!tel) return;
     state.lastTel = tel;
@@ -419,37 +451,34 @@
     const net = tel.network || {};
     const gpu = tel.gpu || {};
 
-    $("ro-cpu").textContent = (isUnavailable(cpu.percent) ? "N/A" : cpu.percent + "%");
-    $("ro-mem").textContent = (isUnavailable(mem.percent) ? "N/A" : mem.percent + "%");
-    $("ro-netdown").textContent = isUnavailable(net.down_bytes_sec) ? "N/A" : fmtBytes(net.down_bytes_sec) + "/s";
-    $("ro-netup").textContent = isUnavailable(net.up_bytes_sec) ? "N/A" : fmtBytes(net.up_bytes_sec) + "/s";
+    setText("ro-cpu", isUnavailable(cpu.percent) ? "N/A" : cpu.percent + "%");
+    setText("ro-mem", isUnavailable(mem.percent) ? "N/A" : mem.percent + "%");
+    setText("ro-netdown", isUnavailable(net.down_bytes_sec) ? "N/A" : fmtBytes(net.down_bytes_sec) + "/s");
+    setText("ro-netup", isUnavailable(net.up_bytes_sec) ? "N/A" : fmtBytes(net.up_bytes_sec) + "/s");
 
-    $("t-cpu").textContent = isUnavailable(cpu.percent) ? "N/A" : cpu.percent;
-    $("t-cpu-sub").textContent = "cores: " + (cpu.core_count ?? "N/A") +
-      " · freq: " + (cpu.freq_mhz ? cpu.freq_mhz + " MHz" : "UNAVAILABLE");
-    $("t-mem").textContent = isUnavailable(mem.percent) ? "N/A" : mem.percent;
-    $("t-mem-sub").textContent = "used " + fmtBytes(mem.used_bytes) + " of " + fmtBytes(mem.total_bytes) +
-      " (" + fmtBytes(mem.available_bytes) + " free)";
-    $("t-disk").textContent = isUnavailable(disk.percent) ? "N/A" : disk.percent;
-    $("t-disk-sub").textContent = "used " + fmtBytes(disk.used_bytes) + " of " + fmtBytes(disk.total_bytes) +
-      " [" + (disk.provenance || "LIVE") + "]";
-    $("t-disk-io").textContent = "I/O: " +
+    setText("t-cpu", isUnavailable(cpu.percent) ? "N/A" : String(cpu.percent));
+    setText("t-cpu-sub", "cores: " + (cpu.core_count ?? "N/A") +
+      " · freq: " + (cpu.freq_mhz ? cpu.freq_mhz + " MHz" : "UNAVAILABLE"));
+    setText("t-mem", isUnavailable(mem.percent) ? "N/A" : String(mem.percent));
+    setText("t-mem-sub", "used " + fmtBytes(mem.used_bytes) + " of " + fmtBytes(mem.total_bytes) +
+      " (" + fmtBytes(mem.available_bytes) + " free)");
+    setText("t-disk", isUnavailable(disk.percent) ? "N/A" : String(disk.percent));
+    setText("t-disk-sub", "used " + fmtBytes(disk.used_bytes) + " of " + fmtBytes(disk.total_bytes) +
+      " [" + (disk.provenance || "LIVE") + "]");
+    setText("t-disk-io", "I/O: " +
       (disk.read_bytes_sec === null || disk.read_bytes_sec === undefined ? "UNAVAILABLE" : "↓ " + fmtBytes(disk.read_bytes_sec) + "/s") +
       " · " +
-      (disk.write_bytes_sec === null || disk.write_bytes_sec === undefined ? "UNAVAILABLE" : "↑ " + fmtBytes(disk.write_bytes_sec) + "/s");
+      (disk.write_bytes_sec === null || disk.write_bytes_sec === undefined ? "UNAVAILABLE" : "↑ " + fmtBytes(disk.write_bytes_sec) + "/s"));
 
-    $("t-netdown").textContent = isUnavailable(net.down_bytes_sec) ? "N/A" : fmtBytes(net.down_bytes_sec).split(" ")[0];
-    $("t-netdown-u").textContent = isUnavailable(net.down_bytes_sec) ? "" : fmtBytes(net.down_bytes_sec).split(" ").slice(1).join(" ") + "/s";
-    $("t-netup").textContent = "up: " + (isUnavailable(net.up_bytes_sec) ? "N/A" : fmtBytes(net.up_bytes_sec) + "/s");
+    const dParts = isUnavailable(net.down_bytes_sec) ? ["N/A", ""] : fmtBytes(net.down_bytes_sec).split(" ");
+    setText("t-netdown", dParts[0]);
+    setText("t-netdown-u", dParts.slice(1).join(" ") + (dParts[1] ? "/s" : ""));
+    setText("t-netup", "up: " + (isUnavailable(net.up_bytes_sec) ? "N/A" : fmtBytes(net.up_bytes_sec) + "/s"));
 
-    const gpuEl = $("t-gpu"), gpuBadge = document.querySelector("#view-telemetry .origin-una") || {};
-    if (gpu.available) {
-      gpuEl.textContent = gpu.util_percent;
-      $("t-gpu-sub").textContent = "temp: " + gpu.temperature_c + "°C · VRAM " + fmtBytes(Number(gpu.vram_used_bytes)) + " / " + fmtBytes(Number(gpu.vram_total_bytes)) + " [" + gpu.message + "]";
-    } else {
-      gpuEl.textContent = "N/A";
-      $("t-gpu-sub").textContent = "UNAVAILABLE — " + gpu.message;
-    }
+    setText("t-gpu", gpu.available ? String(gpu.util_percent) : "N/A");
+    setText("t-gpu-sub", gpu.available
+      ? "temp: " + gpu.temperature_c + "°C · VRAM " + fmtBytes(Number(gpu.vram_used_bytes)) + " / " + fmtBytes(Number(gpu.vram_total_bytes)) + " [" + gpu.message + "]"
+      : "UNAVAILABLE — " + gpu.message);
 
     // Sparkline buffers
     pushChart(state.chartCpu, cpu.percent, isUnavailable(cpu.percent));
@@ -461,37 +490,31 @@
 
     const badge = document.querySelector("#view-telemetry .origin-una");
     if (badge) {
-      badge.textContent = gpu.available ? "LIVE (NVML)" : "UNAVAILABLE";
-      badge.classList.toggle("origin-una", !gpu.available);
+      const label = gpu.available ? "LIVE (NVML)" : "UNAVAILABLE";
+      if (badge.textContent !== label) {
+        badge.textContent = label;
+        badge.classList.toggle("origin-una", !gpu.available);
+      }
     }
-    $("tele-refreshed").textContent = "last update: " + (tel.timestamp || "--") + " [LIVE, psutil · seq " + tel.sequence + "]";
+    setText("tele-refreshed", "last update: " + (tel.timestamp || "--") + " [LIVE, psutil · seq " + tel.sequence + "]");
 
-    // processes
-    const body = $("proc-body");
+    // processes — single diffed innerHTML write (DOM untouched on no-change)
     const procs = tel.top_processes || [];
-    body.innerHTML = procs.length
+    setHtml("proc-body", procs.length
       ? procs.map((p) =>
           "<tr><td class='dim'>" + esc(p.pid) + "</td><td>" + esc(p.name) +
           "</td><td>" + esc(p.cpu_percent) + "</td><td>" + esc(p.memory_percent) + "</td></tr>").join("")
-      : "<tr><td colspan='4' class='na'>UNAVAILABLE</td></tr>";
+      : "<tr><td colspan='4' class='na'>UNAVAILABLE</td></tr>");
 
     // interfaces
-    const il = $("iface-list");
-    if (net.interfaces && net.interfaces.length) {
-      il.innerText = "";
-      net.interfaces.forEach((i) => {
-        const row = document.createElement("div");
-        row.className = "iface-row" + (i.is_up ? "" : " iface-down");
-        row.innerHTML =
+    const ifs = net.interfaces || [];
+    setHtml("iface-list", ifs.length
+      ? ifs.map((i) =>
+          "<div class='iface-row" + (i.is_up ? "" : " iface-down") + "'>" +
           "<span class='iface-name'>" + esc(i.name) + (i.is_up ? "" : " (DOWN)") + "</span>" +
           "<span class='iface-addr'>" + esc((i.addresses || []).join(", ") || "no addresses") + "</span>" +
-          "<span class='dim'>" + (i.speed_mbps === "UNAVAILABLE" ? "speed N/A" : i.speed_mbps + "Mb/s") + "</span>";
-        il.appendChild(row);
-      });
-    } else {
-      il.innerText = "";
-      il.setAttribute("data-empty", "UNAVAILABLE");
-    }
+          "<span class='dim'>" + (i.speed_mbps === "UNAVAILABLE" ? "speed N/A" : i.speed_mbps + "Mb/s") + "</span></div>").join("")
+      : "<div class='iface-row'><span class='dim'>UNAVAILABLE</span></div>");
     syncCoreState();
   }
 
@@ -550,45 +573,35 @@
   function renderSecurity(snapshot) {
     if (!snapshot) return;
     const ts = snapshot.timestamp || "--";
-    $("sec-fresh").textContent = "datapoint: " + ts + " [LIVE]";
+    setText("sec-fresh", "datapoint: " + ts + " [LIVE]");
 
     // listening sockets
-    const lb = $("listen-body");
     const items = snapshot.listening || [];
-    lb.innerHTML = items.length
+    setHtml("listen-body", items.length
       ? items.map((s) =>
           "<tr><td class='dim'>" + esc(s.protocol) + "</td><td>" + esc(s.address) +
           "</td><td>" + esc(s.port) + "</td><td>" + esc(s.process_name) +
           (!s.pid_readable ? " <span class='dim'>(owner unknown)</span>" : "") + "</td></tr>").join("")
-      : "<tr><td colspan='4' class='na'>UNAVAILABLE (global enumeration requires privileges)</td></tr>";
+      : "<tr><td colspan='4' class='na'>UNAVAILABLE (global enumeration requires privileges)</td></tr>");
 
     // interfaces
-    const si = $("sec-ifaces");
-    if (snapshot.interfaces && snapshot.interfaces.length) {
-      si.innerText = "";
-      snapshot.interfaces.forEach((i) => {
-        const row = document.createElement("div");
-        row.className = "iface-row" + (i.is_up ? "" : " iface-down");
-        row.innerHTML =
+    const si = snapshot.interfaces || [];
+    setHtml("sec-ifaces", si.length
+      ? si.map((i) =>
+          "<div class='iface-row" + (i.is_up ? "" : " iface-down") + "'>" +
           "<span class='iface-name'>" + esc(i.name) + (i.is_up ? "" : " (DOWN)") + "</span>" +
           "<span class='iface-addr'>" + esc((i.addresses || []).join(", ") || "no addresses") + "</span>" +
-          "<span class='dim'>" + esc(i.mac || "") + "</span>";
-        si.appendChild(row);
-      });
-    } else {
-      si.innerText = "";
-      si.setAttribute("data-empty", "UNAVAILABLE");
-    }
+          "<span class='dim'>" + esc(i.mac || "") + "</span></div>").join("")
+      : "<div class='iface-row'><span class='dim'>UNAVAILABLE</span></div>");
 
     // connections
-    const cb = $("conn-body");
     const conns = snapshot.connections || [];
-    cb.innerHTML = conns.length
+    setHtml("conn-body", conns.length
       ? conns.map((c) =>
           "<tr><td class='dim'>" + esc(c.local_address + ":" + c.local_port) + "</td><td>" +
           (c.remote_address ? esc(c.remote_address + ":" + c.remote_port) : "<span class='dim'>—</span>") +
           "</td><td class='dim'>" + esc(c.status) + "</td><td>" + esc(c.process_name) + "</td></tr>").join("")
-      : "<tr><td colspan='4' class='na'>UNAVAILABLE</td></tr>";
+      : "<tr><td colspan='4' class='na'>UNAVAILABLE</td></tr>");
 
     // events
     state.events = snapshot.events || [];
@@ -614,18 +627,15 @@
 
   function renderFindings(findings) {
     const box = $("findings-list");
-    box.innerHTML = "";
     if (!findings.length) {
-      box.innerHTML = "<div class='finding-none'>No heuristic indicators raised by the current rule set." +
+      setHtml("findings-list", "<div class='finding-none'>No heuristic indicators raised by the current rule set." +
         "<br><br>IMPORTANT: this does not prove the host is secure. It only means these local, " +
         "host-observable rules found nothing notable. Heuristic findings never assert malice — " +
-        "unfamiliar processes, ports and connections are not automatically suspicious.</div>";
+        "unfamiliar processes, ports and connections are not automatically suspicious.</div>");
       return;
     }
-    findings.forEach((f) => {
-      const div = document.createElement("div");
-      div.className = "finding finding-" + f.severity;
-      div.innerHTML =
+    const html = findings.map((f) => {
+      const div = "<div class='finding finding-" + esc(f.severity) + "'>" +
         "<div class='finding-title'><span class='sev-tag " + esc(f.severity) + "'>" + esc(f.severity).toUpperCase() +
         "</span> " + esc(f.title) + "</div>" +
         "<div class='finding-meta'><span>" + esc(f.finding_id) + "</span><span>" + esc(f.timestamp) +
@@ -634,9 +644,10 @@
         "<div class='finding-desc'>" + esc(f.description) + "</div>" +
         "<div class='finding-ev'>EVIDENCE — " +
         (f.evidence || []).map((e) => esc("[" + e.source + "] " + e.detail)).join(" · ") + "</div>" +
-        "<div class='finding-why'>WHY: " + esc(f.explanation) + "</div>";
-      box.appendChild(div);
-    });
+        "<div class='finding-why'>WHY: " + esc(f.explanation) + "</div></div>";
+      return div;
+    }).join("");
+    setHtml("findings-list", html);
   }
 
   function doExport(fmt) {
@@ -747,6 +758,7 @@
     { label: "Switch: Security", hint: "Ctrl+4", run: () => switchView("security") },
     { label: "Switch: Events", hint: "Ctrl+5", run: () => switchView("events") },
     { label: "Switch: Diagnostics", hint: "Ctrl+6", run: () => switchView("diagnostics") },
+    { label: "Switch: Geo Map", hint: "Ctrl+7", run: () => switchView("map") },
     { label: "Toggle voice mode", hint: "real backend", run: () => bridge && bridge.invoke("toggle_voice", "{}") },
     { label: "Push to talk", hint: "mic", run: () => bridge && bridge.invoke("push_to_talk", "{}") },
     { label: "Toggle dry-run mode", hint: "/dry-run", run: () => runCmd("/dry-run") },

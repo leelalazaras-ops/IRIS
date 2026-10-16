@@ -49,6 +49,9 @@
       <button class="nav-btn" data-view="diagnostics" title="Diagnostics (Ctrl+6)">
         <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">DIAG</span>
       </button>
+      <button class="nav-btn" data-view="map" title="Geo Map (Ctrl+7)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">MAP</span>
+      </button>
       <div class="nav-spacer"></div>
       <button class="nav-btn" id="palette-btn" title="Command palette (Ctrl+K, or ⌘K)">
         <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">⌘K</span>
@@ -223,6 +226,32 @@
         </div>
       </section>
 
+      <!-- MAP -->
+      <section class="view" id="view-map">
+        <div class="panel full">
+          <div class="panel-head">
+            <h2>GEO MAP</h2><span class="origin-badge">REMOTE TILES</span>
+            <div class="toolbar">
+              <button class="btn btn-ghost" id="map-recenter">RECENTER</button>
+              <button class="btn btn-ghost" id="map-reload">RELOAD</button>
+            </div>
+          </div>
+          <div id="map-wrap" class="map-wrap">
+            <div id="map-canvas" class="map-canvas" aria-label="OpenStreetMap interactive map"></div>
+            <div id="map-status" class="map-status hidden"></div>
+          </div>
+          <div class="map-foot">
+            <span id="map-attrib"> map data © OpenStreetMap contributors</span>
+            <span id="map-coords" class="dim">--</span>
+          </div>
+          <div class="sec-caveat">
+            Map tiles are fetched from OpenStreetMap.org on first use.
+            Tile usage follows the OSMF Tile Usage Policy; the HUD is a low-volume
+            interactive client. Offline or erroring tiles show a placeholder grid.
+          </div>
+        </div>
+      </section>
+
       <!-- SETTINGS -->
       <section class="view" id="view-settings">
         <div class="panel full">
@@ -256,6 +285,7 @@
 
   <script src="js/qwebchannel.js"></script>
   <script src="js/core3d.js"></script>
+  <script src="js/map.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

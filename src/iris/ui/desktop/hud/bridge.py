@@ -91,10 +91,26 @@ class IrisBridge(QObject):
         self._security_interval_ms = 5000
         self._webgl_ok: Optional[bool] = None
         self._webgl_detail = "UNKNOWN"
+        self._last_gpu_note = "UNAVAILABLE — no sample yet"
 
     # ------------------------------------------------------------ from worker
 
     def emit_telemetry(self, data: dict) -> None:
+        self.pushTelemetry.emit(_safe_json(data))
+
+    # Called from the collector thread (not the UI thread). QWebChannel
+    # signal emits are thread-safe queued connections, so marshalling to
+    # the UI thread happens here — no timers, no locks held.
+    def emit_telemetry_object(self, snapshot) -> None:
+        try:
+            data = snapshot.to_dict()
+        except Exception:
+            return
+        try:
+            gpu_note = (data.get("gpu") or {}).get("message") or self._last_gpu_note
+        except Exception:
+            gpu_note = self._last_gpu_note
+        self._last_gpu_note = gpu_note
         self.pushTelemetry.emit(_safe_json(data))
 
     def emit_state(self) -> None:
@@ -169,7 +185,7 @@ class IrisBridge(QObject):
                 "webengine": True,
                 "webgl": self._webgl_detail,
                 "telemetry_provenance": "LIVE (psutil)",
-                "gpu_note": self._telemetry.snapshot().gpu.to_dict()["message"],
+                "gpu_note": self._last_gpu_note,  # cached from last live sample
             }
         )
         return diag
@@ -335,6 +351,20 @@ class IrisBridge(QObject):
     def _set_security_interval(self, ms: int) -> None:
         self._security_interval_ms = ms
         self.preferencesChanged.emit(self._telemetry_interval_ms, ms)
+
+    def refresh_telemetry_now(self) -> None:
+        """Push one immediate telemetry sample to the page.
+
+        Used when the window becomes visible again (restore from
+        minimize) so the HUD has fresh data instead of waiting up to a
+        full collector interval. Bounded cost: a single psutil/LIVE
+        snapshot (~3 ms in this container), no secrets, no extra state.
+        """
+        try:
+            snap = self._telemetry.snapshot()
+            self.pushTelemetry.emit(_safe_json(snap.to_dict()))
+        except Exception:
+            pass
 
     def _cmd_report_webgl(self, payload: dict) -> dict:
         ok = bool(payload.get("available", False))

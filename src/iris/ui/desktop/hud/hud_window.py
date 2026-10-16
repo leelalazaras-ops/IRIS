@@ -4,14 +4,23 @@ HUD command-center window for IRIS.
 Hosts the local HTML/CSS/JS control surface inside Qt WebEngine and wires
 the Qt backend worker to a typed QWebChannel bridge. Falls back cleanly
 (never crashing the app) if WebEngine is unavailable.
+
+Performance model:
+  - psutil / NVML / observatory enumeration runs on a dedicated daemon
+    collector thread, never on the Qt UI thread. Snapshots arrive on the
+    UI thread as queued Qt signal deliveries.
+  - When the window is minimized (or otherwise not visible) the collector
+    is paused entirely — no psutil calls, no WebChannel messages — and on
+    re-shown a fresh sample is pushed immediately.
+  - On close, the collector is joined with a timeout and the worker is
+    stopped; nothing outlives the UI.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Slot, Qt
+from PySide6.QtCore import QEvent, QTimer, QUrl, Qt, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QMainWindow
 
@@ -27,6 +36,7 @@ except ImportError:
 
 from iris.ui.desktop.backend import IrisWorker
 from iris.ui.desktop.hud.bridge import IrisBridge
+from iris.ui.desktop.hud.collector import HudCollector
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 
@@ -37,7 +47,9 @@ class IrisHudWindow(QMainWindow):
 
       - loads the fully-local HUD page (no CDN, no network),
       - bridges real IRIS backend signals to the page,
-      - samples real system telemetry and security state on timers,
+      - samples real system telemetry and security state on the
+        dedicated collector thread (NOT the UI thread),
+      - pauses sampling while hidden/minimized,
       - stops all timers/workers on close.
     """
 
@@ -60,24 +72,28 @@ class IrisHudWindow(QMainWindow):
         self._view.page().setWebChannel(self._channel)
         self.setCentralWidget(self._view)
 
-        self._telemetry_timer = QTimer(self)
-        self._telemetry_timer.setInterval(self._bridge._telemetry_interval_ms)
-        self._telemetry_timer.timeout.connect(self._poll_telemetry)
-
-        self._security_timer = QTimer(self)
-        self._security_timer.setInterval(self._bridge._security_interval_ms)
-        self._security_timer.timeout.connect(self._poll_security)
-
         self._history_timer = QTimer(self)
         self._history_timer.setInterval(15000)
         self._history_timer.timeout.connect(self._push_history)
 
+        # Real psutil/NVML/observatory work happens on this dedicated
+        # (daemon) thread — never on the Qt UI thread.
+        self._collector = HudCollector(
+            self._bridge._telemetry,
+            self._bridge._observatory,
+            self._bridge.emit_telemetry_object,
+            self._bridge.emit_security,
+            self._bridge._telemetry_interval_ms,
+            self._bridge._security_interval_ms,
+        )
+
         self._build_menus()
         self._load_page()
 
-        self._telemetry_timer.start()
-        self._security_timer.start()
-        self._history_timer.start()
+        self._history_timer.start()  # the only UI-thread polling timer
+        self._collector.start()
+
+        self.installEventFilter(self)  # visibility-based throttling
 
     # ---------------------------------------------------------------- setup
 
@@ -108,17 +124,6 @@ class IrisHudWindow(QMainWindow):
     # ------------------------------------------------------------- polling
 
     @Slot()
-    def _poll_telemetry(self) -> None:
-        snapshot = self._bridge._telemetry.snapshot()
-        self._bridge.emit_telemetry(snapshot.to_dict())
-
-    @Slot()
-    def _poll_security(self) -> None:
-        snapshot = self._bridge._observatory.poll()
-        self._bridge._last_security = snapshot
-        self._bridge.emit_security(snapshot)
-
-    @Slot()
     def _push_history(self) -> None:
         turns = self._worker.get_recent_turns(limit=50)
         self._bridge.pushHistory.emit(
@@ -135,9 +140,7 @@ class IrisHudWindow(QMainWindow):
 
     def _export_report(self) -> None:
         import json as _json
-        import time as _t
 
-        default = f"iris-security-report-{_t.strftime('%Y%m%d-%H%M%S')}.md"
         path = self._bridge._cmd_request_export_path({"format": "md"})
         if not path.get("path"):
             return  # user cancelled
@@ -149,12 +152,35 @@ class IrisHudWindow(QMainWindow):
         if payload.get("ok"):
             self._bridge.emit_export_ready(path["path"], "md")
 
+    # ------------------------------------------------ visibility throttling
+
+    def eventFilter(self, obj, event) -> bool:
+        """Pause/resume background work when the window state changes."""
+        if obj is self and event.type() == QEvent.Type.WindowStateChange:
+            minimized = bool(self.windowState() & Qt.WindowMinimized)
+            if minimized:
+                self._collector.pause()
+            else:
+                self._collector.resume()
+                # Fresh data right away on restore instead of waiting up to
+                # a full interval for the next collector tick.
+                self._bridge.refresh_telemetry_now()
+        return False
+
+    def showEvent(self, event) -> None:
+        self._collector.resume()
+        self._bridge.refresh_telemetry_now()
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:
+        self._collector.pause()
+        super().hideEvent(event)
+
     # ---------------------------------------------------------- preferences
 
     @Slot(int, int)
     def apply_preferences(self, telemetry_ms: int, security_ms: int) -> None:
-        self._telemetry_timer.setInterval(max(500, telemetry_ms))
-        self._security_timer.setInterval(max(500, security_ms))
+        self._collector.set_intervals(telemetry_ms, security_ms)
 
     # --------------------------------------------------------------- close
 
@@ -163,13 +189,10 @@ class IrisHudWindow(QMainWindow):
         return self._bridge._webgl_detail
 
     def closeEvent(self, event):
-        """Stop every timer and the backend worker; nothing outlives the UI."""
-        for timer in (
-            self._telemetry_timer,
-            self._security_timer,
-            self._history_timer,
-        ):
-            timer.stop()
+        """Stop the collector, every timer, and the backend worker."""
+        self._history_timer.stop()
+        self._collector.stop()
+        self._collector.join(timeout=3.0)
         try:
             self._view.page().setWebChannel(None)
         except Exception:

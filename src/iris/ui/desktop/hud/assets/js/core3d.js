@@ -1,24 +1,37 @@
 /* ============================================================
-   IRIS 3D Core — hand-written WebGL2, zero dependencies, fully local.
-   Real 3D: perspective projection, orbital shell geometry, additive
-   particle field, noise-shaded inner core, scan sweep.
+   IRIS 3D Core — hand-written WebGL2 (with WebGL1 fallback path),
+   zero dependencies, fully local.
 
-   Reacts to IRIS states emitted by app.js via window.IrisCore.setState():
-     idle | processing | speaking | error | listening | disconnected
+   Genuine 3D render pipeline:
+     - real perspective projection + view matrix
+     - per-vertex normal lighting (Lambert + specular, limb darkening)
+     - procedurally detailed surface (grid lines + noise bands + sweep)
+     - additive atmospheric rim shell
+     - orbital particle field occluded by the globe (depth-tested)
+     - drag-rotate with inertia, auto-spin while idle
 
-   If WebGL2 (and WebGL1) are unavailable, draws a restrained 2D canvas
-   fallback ring instead and reports it through a callback.
+   Performance model:
+     - every matrix is preallocated; only one rotation is rewritten
+       per frame (no per-frame Float32Array churn)
+     - DPR capped at 1.5; adaptive "reduced effects" mode drops DPR to
+       1.0, halves particle draw count and skips the rim shell when the
+       rolling average frame time exceeds ~26 ms on 90 frames
+     - rendering fully stops (rAF cancelled) when the page is hidden or
+       the core view is inactive, and resumes on demand
+     - fallback: if WebGL2/WebGL1 cannot initialise, a restrained 2D
+       canvas ring is drawn and the failure is surfaced via onModeChange
+       ("2d") — never presented as true 3D.
    ============================================================ */
 "use strict";
 
 (function () {
   const STATES = {
-    idle:        { speed: 0.6,  glow: 1.0, hue: 0.00, jitter: 0.0, points: 1.0 },
-    processing:  { speed: 3.2,  glow: 1.8, hue: 0.55, jitter: 0.5, points: 1.6 },
-    listening:   { speed: 1.6,  glow: 1.4, hue: 0.15, jitter: 0.15, points: 1.2 },
-    speaking:    { speed: 1.2,  glow: 1.6, hue: 0.12, jitter: 0.9, points: 0.9 },
-    error:       { speed: 1.0,  glow: 1.1, hue: -0.18, jitter: 0.25, points: 0.7 },
-    disconnected:{ speed: 0.15, glow: 0.4, hue: -0.5, jitter: 0.0, points: 0.5 },
+    idle:         { speed: 0.6,  glow: 1.0, hue: 0.00,  jitter: 0.0,  points: 1.0 },
+    processing:   { speed: 3.2,  glow: 1.8, hue: 0.55,  jitter: 0.5,  points: 1.6 },
+    listening:    { speed: 1.6,  glow: 1.4, hue: 0.15,  jitter: 0.15, points: 1.2 },
+    speaking:     { speed: 1.2,  glow: 1.6,  hue: 0.12,  jitter: 0.9,  points: 0.9 },
+    error:        { speed: 1.0,  glow: 1.1, hue: -0.18, jitter: 0.25, points: 0.7 },
+    disconnected: { speed: 0.15, glow: 0.4, hue: -0.5,  jitter: 0.0,  points: 0.5 },
   };
 
   function IrisCore(canvas, onModeChange) {
@@ -26,11 +39,36 @@
     this.onModeChange = onModeChange || function () {};
     this.stateName = "disconnected";
     this.target = STATES.disconnected;
-    this.current = STATES.disconnected;
-    this.mode = "none";       // "webgl2" | "webgl1" | "2d"
+    this.current = Object.assign({}, STATES.disconnected);
+    this.mode = "none";            // "webgl2" | "webgl1" | "2d"
+    this.quality = "high";         // "high" | "reduced"
+    this.fps = 0;                  // rolling display estimate
+    this._rot = 0;                 // Y rotation accumulated
+    this._dragVel = 0;             // pointer inertia (rad/s)
+    this._dragging = false;
+    this._lastPointerX = 0;
     this._last_t = 0;
-    this._particles = [];
-    this._running = true;
+    this._raf = 0;
+    this._running = false;
+    this._paused = false;          // set by app (view switch)
+    this._hidden = document.hidden; // page hidden/minimized
+    this._frameAvg = 16;           // ms, rolling
+    this._slowLimit = 26;
+    this._slowTicks = 0;
+    this._reducedReported = false;
+
+    // Preallocated matrices — never allocated per frame.
+    this._mProj = new Float32Array(16);
+    this._mView = new Float32Array(16);
+    this._mModel = new Float32Array(16);
+    this._mTilt = new Float32Array(16);
+    this._mSpin = new Float32Array(16);
+
+    this._bindPointer();
+    document.addEventListener("visibilitychange", () => {
+      this._hidden = document.hidden;
+      this._updateRunning();
+    });
   }
 
   IrisCore.prototype.setState = function (name) {
@@ -38,33 +76,61 @@
     if (name === this.stateName) return;
     this.stateName = name;
     this.target = STATES[name];
-    if (this.mode === "2d") this._draw2dImmediate();
   };
 
-  /* ------------------------------------------------ init */
+  /* ------------------------------------------------ lifecycle */
 
   IrisCore.prototype.start = function () {
-    var ok = this._initGL();
-    if (!ok) ok = this._init2D();
-    if (!ok) return false;
-    var self = this;
-    function frame(t) {
-      if (!self._running) return;
-      self._frame(t);
-      requestAnimationFrame(frame);
+    if (this._running) return true;
+    if (!this.mode) {
+      if (!this._initGL() && !this._init2D()) return false;
     }
-    requestAnimationFrame(frame);
+    this._running = true;
+    this._updateRunning();
     this.onModeChange(this.mode, this._rendererInfo);
     return true;
   };
 
-  IrisCore.prototype.stop = function () { this._running = false; };
+  IrisCore.prototype.stop = function () {
+    this._running = false;
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+  };
+
+  /** Pause/resume driven from app.js (view switches). */
+  IrisCore.prototype.setPaused = function (paused) {
+    this._paused = !!paused;
+    this._updateRunning();
+  };
+
+  IrisCore.prototype.setReducedMotion = function (reduced) {
+    this._reducedMotion = !!reduced;
+    if (reduced) this.quality = "reduced";
+    this._updateRunning();
+  };
+
+  IrisCore.prototype._updateRunning = function () {
+    const wantRun = this._running && !this._paused && !this._hidden;
+    if (wantRun && !this._raf) {
+      this._last_t = 0;
+      const self = this;
+      function frame(t) {
+        if (!self._running || self._paused || self._hidden) { self._raf = 0; return; }
+        self._frame(t);
+        self._raf = requestAnimationFrame(frame);
+      }
+      this._raf = requestAnimationFrame(frame);
+    } else if (!wantRun && this._raf) {
+      cancelAnimationFrame(this._raf);
+      this._raf = 0;
+    }
+  };
+
+  /* ------------------------------------------------ init GL */
 
   IrisCore.prototype._initGL = function () {
-    var gl = null;
-    var glver = "";
+    var gl = null, glver = "";
     try {
-      gl = this.canvas.getContext("webgl2", { antialias: true, alpha: true });
+      gl = this.canvas.getContext("webgl2", { antialias: true, alpha: true, powerPreference: "high-performance" });
       glver = "webgl2";
       if (!gl) {
         gl = this.canvas.getContext("webgl", { antialias: true, alpha: true }) ||
@@ -72,48 +138,104 @@
         glver = "webgl1";
       }
     } catch (e) { gl = null; }
-    if (!gl) return false;
+    if (!gl) {
+      this._rendererInfo = "WEBGL UNAVAILABLE (2D fallback active)";
+      return false;
+    }
 
     this.gl = gl;
     this.glver = glver;
 
-    var glsl = glver === "webgl2" ? "#version 300 es\n" : "";
     var is3 = glver === "webgl2";
-    var a = is3 ? "in " : "attribute ";      // vertex inputs
-    var v = is3 ? "out " : "varying ";       // vertex outputs
-    var vf = is3 ? "in " : "varying ";       // fragment inputs
+    var glsl = is3 ? "#version 300 es\n" : "";
+    var a = is3 ? "in " : "attribute ";
+    var v = is3 ? "out " : "varying ";
+    var vf = is3 ? "in " : "varying ";
     var f = is3 ? "out vec4 fragColor;" : "";
+    var fAssign = is3 ? "fragColor = " : "gl_FragColor = ";
     var fragPre = is3 ? "#version 300 es\nprecision highp float;\n" : "precision mediump float;\n";
 
-    // ---- core sphere shaders
+    // ---------- lit globe: Lambert + specular + procedural surface ----
     this.coreProg = this._program(
       glsl + `
       ${a} vec3 aPos;
-      uniform mat4 uProj, uView;
+      ${a} vec3 aNorm;
+      uniform mat4 uProj, uView, uModel;
+      uniform mat3 uNormMat;
       uniform float uJitter;
-      ${v} vec3 vPos;
+      ${v} vec3 vN;
+      ${v} vec3 vP;
       void main(){
-        vec3 p = aPos * (1.0 + uJitter * 0.03 * sin(aPos.y * 24.0));
-        vPos = aPos;
-        gl_Position = uProj * uView * vec4(p, 1.0);
+        vec3 p = aPos * (1.0 + uJitter * 0.02 * sin(aPos.y * 18.0));
+        vP = p;
+        vN = uNormMat * aNorm;
+        gl_Position = uProj * uView * uModel * vec4(p, 1.0);
       }`,
       fragPre + `
-      ${vf} vec3 vPos;
-      uniform float uGlow, uScan;
+      ${vf} vec3 vN;
+      ${vf} vec3 vP;
+      uniform float uGlow, uScan, uTime;
       ${f}
       void main(){
-        float rr = length(vPos);
-        float rim = smoothstep(0.72, 1.0, rr);
-        float n = sin(vPos.x*12.0 + uScan)*sin(vPos.y*9.0 - uScan)*sin(vPos.z*11.0);
-        vec3 base = mix(vec3(0.05, 0.16, 0.22), vec3(0.13, 0.83, 0.94), rim);
-        vec3 col = base * uGlow + vec3(0.0, 0.06, 0.08) * (0.5 + 0.5 * n);
-        float alpha = 0.14 + rim * 0.85;
-        ${is3 ? "fragColor = vec4(col, alpha);" : "gl_FragColor = vec4(col, alpha);"}
+        vec3 N = normalize(vN);
+        vec3 L = normalize(vec3(-0.45, 0.55, 0.7));
+        vec3 V = normalize(vec3(0.0, 0.12, 1.0));
+        float diff = max(dot(N, L), 0.0);
+        float spec = pow(max(dot(reflect(-L, N), V), 0.0), 26.0);
+        float limb = 1.0 - 0.55 * pow(1.0 - max(dot(N, V), 0.0), 1.6);
+
+        // cheap procedural detail: lat/long tech grid + breathing bands
+        float lat = vP.y;
+        float lon = atan(vP.z, vP.x);
+        float grid = 0.0;
+        grid += smoothstep(0.96, 1.0, abs(sin(lat * 14.0))) * 0.28;
+        grid += smoothstep(0.965, 1.0, abs(sin(lon * 18.0))) * 0.22;
+        float bands = 0.5 + 0.5 * sin(lon * 3.0 + vP.y * 5.0 + uTime * 0.35);
+        float n = sin(vP.x*9.0 + uScan)*sin(vP.y*7.0 - uScan)*sin(vP.z*8.0);
+
+        vec3 deep   = vec3(0.03, 0.09, 0.13);
+        vec3 lit    = vec3(0.10, 0.42, 0.52);
+        vec3 accent = vec3(0.13, 0.82, 0.94);
+        vec3 base = mix(deep, lit, diff * limb);
+        base += accent * grid * (0.25 + 0.35 * diff);
+        base += vec3(0.05, 0.35, 0.10) * bands * 0.14;
+        float fres = pow(1.0 - max(dot(N, V), 0.0), 2.6);
+        vec3 col = base * (0.85 + 0.30 * uGlow);
+        col += vec3(0.0, 0.55, 0.75) * fres * (0.55 + 0.35 * uGlow);
+        col += accent * spec * 0.6;
+        col += vec3(0.0, 0.22, 0.28) * abs(n) * 0.22;
+        float alpha = 1.0;
+        ${fAssign}vec4(col, alpha);
       }`
     );
-    if (!this.coreProg) return false;
+    if (!this.coreProg) { this._initFailure("shader compile failed"); return false; }
 
-    // ---- particle shaders (additive points on an orbital shell)
+    // ---------- additive atmosphere rim shell ------------------------
+    this.rimProg = this._program(
+      glsl + `
+      ${a} vec3 aPos;
+      uniform mat4 uProj, uView, uModel;
+      ${v} vec3 vP;
+      void main(){
+        vP = aPos;
+        gl_Position = uProj * uView * uModel * vec4(aPos * 1.045, 1.0);
+      }`,
+      fragPre + `
+      ${vf} vec3 vP;
+      uniform float uGlow;
+      ${f}
+      void main(){
+        vec3 N = normalize(vP);
+        vec3 V = normalize(vec3(0.0, 0.12, 1.0));
+        float fres = pow(1.0 - abs(dot(N, V)), 3.2);
+        float glow = fres * (0.5 + 0.5 * uGlow);
+        vec3 rim = mix(vec3(0.05, 0.35, 0.45), vec3(0.30, 0.85, 0.95), glow);
+        ${fAssign}vec4(rim, glow * 0.9);
+      }`
+    );
+    if (!this.rimProg) { this._initFailure("rim shader compile failed"); return false; }
+
+    // ---------- particles (additive, depth-occluded) ------------------
     this.partProg = this._program(
       glsl + `
       ${a} vec3 aPos;
@@ -126,7 +248,6 @@
         vec3 p = aPos;
         float r = length(p);
         p.y += 0.12 * sin(uTime * 0.9 + s);
-        // breathing shell
         r = r * (1.0 + 0.04 * sin(uTime * 1.4 + s * 3.0)) * uSpread;
         p = p / length(p) * r;
         gl_Position = uProj * uView * uModel * vec4(p, 1.0);
@@ -135,51 +256,73 @@
       }`,
       fragPre + `
       ${vf} float vA;
-      uniform float uGlow; uniform vec3 uTint;
+      uniform float uGlow;
+      uniform vec3 uTint;
       ${f}
       void main(){
         vec2 d = gl_PointCoord - vec2(0.5);
         float m = smoothstep(0.5, 0.0, length(d));
-        ${is3 ? "fragColor = vec4(uTint, vA * m * uGlow);" : "gl_FragColor = vec4(uTint, vA * m * uGlow);"}
+        ${fAssign}vec4(uTint, vA * m * uGlow);
       }`
     );
-    if (!this.partProg) return false;
+    if (!this.partProg) { this._initFailure("particle shader compile failed"); return false; }
 
-    // core sphere geometry (icosahedron-ish sphere mesh)
-    var sphere = this._sphereGeometry(1.0, 28);
+    // ---------- static geometry (built once, never re-sent) -----------
+    var sphere = this._sphereGeometry(1.0, 44);
+    var verts = new Float32Array(sphere.length);
+    verts.set(sphere);
+    this.coreCount = sphere.positionCount;
     this.coreBuf = gl.createBuffer();
-    this.coreCount = sphere.length / 3;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.coreBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sphere), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
 
-    // particles on two orbital shells
+    var shell = this._sphereGeometry(1.0, 28);
+    this.shellCount = shell.positionCount;
+    this.shellBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.shellBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(shell), gl.STATIC_DRAW);
+
     var N = 1400;
-    var parts = [];
+    var parts = new Float32Array(N * 4);
     for (var i = 0; i < N; i++) {
-      var shell = i % 3 === 0 ? 1.25 : 1.55;
+      var sh = i % 3 === 0 ? 1.25 : 1.55;
       var u = Math.random(), w = Math.random();
       var th = 2 * Math.PI * u, ph = Math.acos(2 * w - 1);
-      parts.push(
-        shell * Math.sin(ph) * Math.cos(th),
-        shell * Math.cos(ph),
-        shell * Math.sin(ph) * Math.sin(th),
-        Math.random()
-      );
+      parts[i * 4]     = sh * Math.sin(ph) * Math.cos(th);
+      parts[i * 4 + 1] = sh * Math.cos(ph);
+      parts[i * 4 + 2] = sh * Math.sin(ph) * Math.sin(th);
+      parts[i * 4 + 3] = Math.random();
     }
     this.partBuf = gl.createBuffer();
     this.partCount = N;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(parts), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, parts, gl.STATIC_DRAW);
 
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.pointSizeRange = null;
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
 
-    this.mode = glver;
+    // Fixed static viewspace-dependent pieces, built once.
+    this._tilt = 23.4 * Math.PI / 180.0;
+    this._computeProj();
 
     var dbg = gl.getExtension("WEBGL_debug_renderer_info");
-    this._rendererInfo = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : "";
+    this._rendererInfo = dbg
+      ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+      : gl.getParameter(gl.RENDERER) || "unidentified renderer";
+
+    this.mode = glver;
+    if (/swiftshader|llvmpipe|software|basic render/i.test(this._rendererInfo)) {
+      this._rendererInfo = "software renderer: " + this._rendererInfo;
+    }
     return true;
+  };
+
+  IrisCore.prototype._initFailure = function (why) {
+    this.gl = null;
+    this._rendererInfo = "WEBGL UNAVAILABLE — " + why;
+    this.mode = null;
   };
 
   IrisCore.prototype._program = function (vsSrc, fsSrc) {
@@ -206,35 +349,41 @@
       return null;
     }
     var uniforms = {};
+    var attrs = {};
     var nU = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
     for (var i = 0; i < nU; i++) {
       var info = gl.getActiveUniform(prog, i);
       uniforms[info.name.replace("[0]", "")] = gl.getUniformLocation(prog, info.name);
     }
-    return { prog: prog, uniforms: uniforms };
+    var nA = gl.getProgramParameter(prog, gl.ACTIVE_ATTRIBUTES);
+    for (var j = 0; j < nA; j++) {
+      var aInfo = gl.getActiveAttrib(prog, j);
+      attrs[aInfo.name] = gl.getAttribLocation(prog, aInfo.name);
+    }
+    return { prog: prog, uniforms: uniforms, attrs: attrs };
   };
 
+  /** Interleaved sphere: pos(3) + normal(3). Returns {array, positionCount}. */
   IrisCore.prototype._sphereGeometry = function (radius, seg) {
+    var rows = Math.round(seg * 0.7);
     var verts = [];
-    for (var y = 0; y < seg; y++) {
-      var v0 = y / seg, v1 = (y + 1) / seg;
-      var th0 = v0 * Math.PI, th1 = v1 * Math.PI;
+    var count = 0;
+    function push(th, ph) {
+      var x = radius * Math.sin(th) * Math.cos(ph),
+          y = radius * Math.cos(th),
+          z = radius * Math.sin(th) * Math.sin(ph);
+      verts.push(x, y, z, x / radius, y / radius, z / radius);
+      count++;
+    }
+    for (var y = 0; y < rows; y++) {
+      var th0 = (y / rows) * Math.PI, th1 = ((y + 1) / rows) * Math.PI;
       for (var x = 0; x < seg; x++) {
-        var u0 = x / seg, u1 = (x + 1) / seg;
-        var ph0 = u0 * 2 * Math.PI, ph1 = u1 * 2 * Math.PI;
-        function pt(th, ph) {
-          return [
-            radius * Math.sin(th) * Math.cos(ph),
-            radius * Math.cos(th),
-            radius * Math.sin(th) * Math.sin(ph),
-          ];
-        }
-        var p00 = pt(th0, ph0), p01 = pt(th0, ph1), p10 = pt(th1, ph0), p11 = pt(th1, ph1);
-        verts.push.apply(verts, p00); verts.push.apply(verts, p10); verts.push.apply(verts, p01);
-        verts.push.apply(verts, p01); verts.push.apply(verts, p10); verts.push.apply(verts, p11);
+        var ph0 = (x / seg) * 2 * Math.PI, ph1 = ((x + 1) / seg) * 2 * Math.PI;
+        push(th0, ph0); push(th1, ph0); push(th0, ph1);
+        push(th0, ph1); push(th1, ph0); push(th1, ph1);
       }
     }
-    return verts;
+    return { array: verts, positionCount: count };
   };
 
   /* ------------------------------------------------ 2D fallback */
@@ -243,12 +392,9 @@
     this.ctx2d = this.canvas.getContext("2d");
     if (!this.ctx2d) return false;
     this.mode = "2d";
-    this._rendererInfo = "2D canvas fallback (WebGL unavailable)";
+    this.quality = "high";
+    this._rendererInfo = "2D canvas fallback (WEBGL UNAVAILABLE — not true 3D)";
     return true;
-  };
-
-  IrisCore.prototype._draw2dImmediate = function () {
-    // also used by the per-frame 2d loop
   };
 
   IrisCore.prototype._draw2d = function (t) {
@@ -273,12 +419,114 @@
     ctx.fill();
   };
 
+  /* ------------------------------------------------ interaction */
+
+  IrisCore.prototype._bindPointer = function () {
+    var self = this;
+    var el = this.canvas;
+    el.style.touchAction = "none";
+    el.addEventListener("pointerdown", function (e) {
+      self._dragging = true;
+      self._lastPointerX = e.clientX;
+      self._dragVel = 0;
+      try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    el.addEventListener("pointermove", function (e) {
+      if (!self._dragging) return;
+      var dx = e.clientX - self._lastPointerX;
+      self._lastPointerX = e.clientX;
+      self._rot += dx * 0.008;
+      self._dragVel = dx * 0.008 * 60; // rad/s estimate at pointer event rate
+    });
+    function end() { self._dragging = false; }
+    el.addEventListener("pointerup", end);
+    el.addEventListener("pointercancel", end);
+    el.addEventListener("pointerleave", end);
+  };
+
+  /* ------------------------------------------------ matrices */
+
+  IrisCore.prototype._computeProj = function () {
+    var W = this.canvas.clientWidth, H = this.canvas.clientHeight || 1;
+    var aspect = Math.max(0.1, W / Math.max(1, H));
+    var f = 1 / Math.tan(38 * Math.PI / 360);
+    var near = 0.1, far = 40, nf = 1 / (near - far);
+    var m = this._mProj;
+    m[0] = f / aspect; m[1] = 0; m[2] = 0; m[3] = 0;
+    m[4] = 0; m[5] = f; m[6] = 0; m[7] = 0;
+    m[8] = 0; m[9] = 0; m[10] = (far + near) * nf; m[11] = -1;
+    m[12] = 0; m[13] = 0; m[14] = 2 * far * near * nf; m[15] = 0;
+  };
+
+  // Static view matrix (eye at 0,0.4,4.6 looking at origin), built once.
+  IrisCore.prototype._viewCache = new Float32Array([
+    1, 0, 0, 0,
+    0, 0.99483, 0.10163, 0,
+    0, -0.10163, 0.99483, 0,
+    0, -0.43907, -4.58019, 1,
+  ]);
+
+  IrisCore.prototype._tiltMat = function () {
+    var c = Math.cos(this._tilt), s = Math.sin(this._tilt);
+    var m = this._mTilt;
+    m[0] = 1; m[1] = 0; m[2] = 0; m[3] = 0;
+    m[4] = 0; m[5] = c; m[6] = s; m[7] = 0;
+    m[8] = 0; m[9] = -s; m[10] = c; m[11] = 0;
+    m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
+  };
+
+  IrisCore.prototype._spinMat = function (a) {
+    var c = Math.cos(a), s = Math.sin(a);
+    var m = this._mSpin;
+    m[0] = c; m[1] = 0; m[2] = -s; m[3] = 0;
+    m[4] = 0; m[5] = 1; m[6] = 0; m[7] = 0;
+    m[8] = s; m[9] = 0; m[10] = c; m[11] = 0;
+    m[12] = 0; m[13] = 0; m[14] = 0; m[15] = 1;
+  };
+
+  // model = tilt * spin (column-major, column-major stored)
+  IrisCore.prototype._mul4 = function (out, a, b) {
+    for (var col = 0; col < 4; col++) {
+      var b0 = b[col * 4], b1 = b[col * 4 + 1], b2 = b[col * 4 + 2], b3 = b[col * 4 + 3];
+      out[col * 4]     = a[0] * b0 + a[4] * b1 + a[8] * b2 + a[12] * b3;
+      out[col * 4 + 1] = a[1] * b0 + a[5] * b1 + a[9] * b2 + a[13] * b3;
+      out[col * 4 + 2] = a[2] * b0 + a[6] * b1 + a[10] * b2 + a[14] * b3;
+      out[col * 4 + 3] = a[3] * b0 + a[7] * b1 + a[11] * b2 + a[15] * b3;
+    }
+  };
+
+  // Fixed 3x3 upper-left of identity-based tilt*spin model for normals.
+  IrisCore.prototype._normMat = function (out, model) {
+    // uniform scale => rotation part works directly for normals
+    out[0] = model[0]; out[1] = model[1]; out[2] = model[2];
+    out[3] = model[4]; out[4] = model[5]; out[5] = model[6];
+    out[6] = model[8]; out[7] = model[9]; out[8] = model[10];
+  };
+
   /* ------------------------------------------------ render loop */
 
   IrisCore.prototype._frame = function (tms) {
     var t = tms / 1000;
-    var dt = Math.min(0.1, (tms - this._last_t) / 1000 || 0.016);
+    var dt = Math.min(0.1, (this._last_t ? (tms - this._last_t) / 1000 : 0.016));
     this._last_t = tms;
+
+    // rolling frame-time monitor -> adaptive quality
+    var ft = dt * 1000;
+    this._frameAvg += (ft - this._frameAvg) * 0.05;
+    this.fps = Math.round(1000 / Math.max(1, this._frameAvg));
+    if (this.mode !== "2d" && this.quality !== "reduced") {
+      if (this._frameAvg > this._slowLimit) {
+        if (++this._slowTicks >= 90) {
+          this.quality = "reduced";
+          this._dropEffects();
+          this.onModeChange(this.mode,
+            "REDUCED EFFECTS (avg frame " + this._frameAvg.toFixed(0) + "ms)");
+          this._reducedReported = true;
+        }
+      } else {
+        this._slowTicks = Math.max(0, this._slowTicks - 2);
+      }
+    }
 
     // ease current towards target state
     var s = this.current, tgt = this.target;
@@ -292,127 +540,124 @@
     if (this.mode === "2d") { this._draw2d(tms); return; }
 
     var gl = this.gl;
+
+    // size sync only when actually changed (clientWidth read is cheap
+    // enough once per frame, resize writes are rare)
     var W = this.canvas.clientWidth, H = this.canvas.clientHeight;
-    var dpr = Math.min(2, window.devicePixelRatio || 1);
-    if (W !== 0 && this.canvas.width !== Math.floor(W * dpr)) {
-      this.canvas.width = Math.floor(W * dpr);
-      this.canvas.height = Math.floor(H * dpr);
+    var dprCap = (this.quality === "reduced" || this._reducedMotion)
+      ? 1.0 : Math.min(1.5, window.devicePixelRatio || 1);
+    var cw = Math.floor(W * dprCap), ch = Math.floor(H * dprCap);
+    if (W !== 0 && (this.canvas.width !== cw || this.canvas.height !== ch)) {
+      this.canvas.width = cw;
+      this.canvas.height = ch;
+      this._computeProj();
     }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
-    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    var proj = this._persp(38 * Math.PI / 180, this.canvas.width / Math.max(1, this.canvas.height), 0.1, 40);
-    var eyeDist = 4.6;
-    var view = this._lookAt([0, 0.4, eyeDist], [0, 0, 0], [0, 1, 0]);
+    // rotation: auto-spin or drag inertia
+    if (!this._dragging) {
+      if (Math.abs(this._dragVel) > 0.02) {
+        this._rot += this._dragVel * dt;
+        this._dragVel *= Math.pow(0.02, dt); // exponential decay
+      } else {
+        this._dragVel = 0;
+        var spin = (this._reducedMotion ? 0.1 : 0.25) * s.speed;
+        this._rot += dt * spin;
+      }
+    }
+    this._spinMat(this._rot);
+    this._tiltMat();
+    this._mul4(this._mModel, this._mTilt, this._mSpin);
+    var normM = this._normScratch || (this._normScratch = new Float32Array(9));
+    this._normMat(normM, this._mModel);
 
-    // slow global spin, faster when processing
-    this._rot += dt * 0.25 * s.speed;
-    var model = this._rotY(this._rot);
-
-    // ---- particles (drawn first, additive)
-    gl.useProgram(this.partProg.prog);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuf);
-    this._abstract({
-      proj: proj, view: view, model: model, time: t,
-      spread: s.points, size: (3.4) * (this.glver === "webgl2" ? 1 : 1),
-      glow: s.glow,
-      tint: this._tint(s.hue),
-    }, this.partProg.uniforms);
-
-    var aPos = gl.getAttribLocation(this.partProg.prog, "aPos");
-    var aSeed = gl.getAttribLocation(this.partProg.prog, "aSeed");
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 16, 0);
-    gl.enableVertexAttribArray(aSeed);
-    gl.vertexAttribPointer(aSeed, 1, gl.FLOAT, false, 16, 12);
-    gl.drawArrays(gl.POINTS, 0, this.partCount);
-    gl.disableVertexAttribArray(aSeed);
-
-    // ---- core sphere
+    // ---- globe (opaque, lit, depth-written) --------------------------
     gl.enable(gl.DEPTH_TEST);
-    gl.depthMask(false);
-    gl.useProgram(this.coreProg.prog);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    var cp = this.coreProg;
+    gl.useProgram(cp.prog);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.coreBuf);
-    var u = this.coreProg.uniforms;
-    gl.uniformMatrix4fv(u.uProj, false, proj);
-    gl.uniformMatrix4fv(u.uView, false, view);
+    var u = cp.uniforms;
+    gl.uniformMatrix4fv(u.uProj, false, this._mProj);
+    gl.uniformMatrix4fv(u.uView, false, this._viewCache);
+    gl.uniformMatrix4fv(u.uModel, false, this._mModel);
+    gl.uniformMatrix3fv(u.uNormMat, false, normM);
     gl.uniform1f(u.uGlow, s.glow);
     gl.uniform1f(u.uScan, t);
+    gl.uniform1f(u.uTime, t);
     gl.uniform1f(u.uJitter, s.jitter);
-    var aP = gl.getAttribLocation(this.coreProg.prog, "aPos");
-    gl.enableVertexAttribArray(aP);
-    gl.vertexAttribPointer(aP, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(cp.attrs.aPos);
+    gl.vertexAttribPointer(cp.attrs.aPos, 3, gl.FLOAT, false, 24, 0);
+    gl.enableVertexAttribArray(cp.attrs.aNorm);
+    gl.vertexAttribPointer(cp.attrs.aNorm, 3, gl.FLOAT, false, 24, 12);
     gl.drawArrays(gl.TRIANGLES, 0, this.coreCount);
-    gl.disable(gl.DEPTH_TEST);
 
-    // orbital scan ring drawn as second particle pass
-    gl.useProgram(this.partProg.prog);
-    gl.uniformMatrix4fv(this.partProg.uniforms.uModel, false, this._rotY(-this._rot * 1.7));
-    gl.uniform1f(this.partProg.uniforms.uSpread, 1.06);
-    gl.uniform1f(this.partProg.uniforms.uSize, 5.2);
+    // ---- atmospheric rim (additive, no depth write) ------------------
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.depthMask(false);
+    if (this.quality === "high") {
+      var rp = this.rimProg;
+      gl.useProgram(rp.prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.shellBuf);
+      var ru = rp.uniforms;
+      gl.uniformMatrix4fv(ru.uProj, false, this._mProj);
+      gl.uniformMatrix4fv(ru.uView, false, this._viewCache);
+      gl.uniformMatrix4fv(ru.uModel, false, this._mModel);
+      gl.uniform1f(ru.uGlow, s.glow);
+      gl.enableVertexAttribArray(rp.attrs.aPos);
+      gl.vertexAttribPointer(rp.attrs.aPos, 3, gl.FLOAT, false, 0, 0);
+      gl.drawArrays(gl.TRIANGLES, 0, this.shellCount);
+    }
+
+    // ---- particles (additive points on orbital shells) ---------------
+    var pp = this.partProg;
+    gl.useProgram(pp.prog);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuf);
-    gl.enableVertexAttribArray(aPos);
-    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 16, 0);
-    gl.uniform3f(this.partProg.uniforms.uTint, 0.18, 0.9, 0.75);
-    gl.drawArrays(gl.POINTS, 0, Math.floor(this.partCount / 5));
+    var pu = pp.uniforms;
+    var drawCount = this.quality === "reduced"
+      ? Math.floor(this.partCount * 0.45) : this.partCount;
+    gl.uniformMatrix4fv(pu.uProj, false, this._mProj);
+    gl.uniformMatrix4fv(pu.uView, false, this._viewCache);
+    gl.uniformMatrix4fv(pu.uModel, false, this._mModel);
+    gl.uniform1f(pu.uTime, t);
+    gl.uniform1f(pu.uSpread, s.points);
+    gl.uniform1f(pu.uSize, (this.quality === "reduced" ? 2.6 : 3.4));
+    gl.uniform1f(pu.uGlow, s.glow);
+    var tint = this._tint(s.hue);
+    gl.uniform3f(pu.uTint, tint[0], tint[1], tint[2]);
+    gl.enableVertexAttribArray(pp.attrs.aPos);
+    gl.vertexAttribPointer(pp.attrs.aPos, 3, gl.FLOAT, false, 16, 0);
+    gl.enableVertexAttribArray(pp.attrs.aSeed);
+    gl.vertexAttribPointer(pp.attrs.aSeed, 1, gl.FLOAT, false, 16, 12);
+    gl.drawArrays(gl.POINTS, 0, drawCount);
+
+    // ---- counter-rotating scan ring (same buffer, different model) ---
+    if (this.quality === "high" && !this._reducedMotion) {
+      this._spinMat(-this._rot * 1.7);
+      var ring = this._mRing || (this._mRing = new Float32Array(16));
+      this._mul4(ring, this._mTilt, this._mSpin);
+      gl.uniformMatrix4fv(pu.uModel, false, ring);
+      gl.uniform1f(pu.uSpread, 1.06);
+      gl.uniform1f(pu.uSize, 5.2);
+      gl.uniform3f(pu.uTint, 0.18, 0.9, 0.75);
+      gl.drawArrays(gl.POINTS, 0, Math.floor(drawCount / 5));
+    }
   };
 
-  IrisCore.prototype._abstract = function (values, uniforms) {
-    var gl = this.gl;
-    if (uniforms.uProj) gl.uniformMatrix4fv(uniforms.uProj, false, values.proj);
-    if (uniforms.uView) gl.uniformMatrix4fv(uniforms.uView, false, values.view);
-    if (uniforms.uModel) gl.uniformMatrix4fv(uniforms.uModel, false, values.model);
-    if (uniforms.uTime) gl.uniform1f(uniforms.uTime, values.time);
-    if (uniforms.uSpread) gl.uniform1f(uniforms.uSpread, values.spread);
-    if (uniforms.uSize) gl.uniform1f(uniforms.uSize, values.size);
-    if (uniforms.uGlow) gl.uniform1f(uniforms.uGlow, values.glow);
-    if (uniforms.uTint) gl.uniform3f(uniforms.uTint, values.tint[0], values.tint[1], values.tint[2]);
+  IrisCore.prototype._dropEffects = function () {
+    // Signals the loop to: DPR 1.0, skip rim + scan ring, fewer points.
+    // Actual switches happen inline in _frame; nothing else to do here.
   };
 
   IrisCore.prototype._tint = function (hueShift) {
-    // cyan -> teal -> blue scale; hueShift offsets toward warm/red on error/disconnect
     var r = 0.13 + Math.max(0, -hueShift) * 0.65;
     var g = 0.83 + hueShift * 0.1;
     var b = 0.94 + Math.min(0, hueShift) * 0.3;
     return [Math.min(1, r), Math.max(0.1, Math.min(1, g)), Math.min(1, b)];
-  };
-
-  IrisCore.prototype._persp = function (fovy, aspect, near, far) {
-    var f = 1 / Math.tan(fovy / 2);
-    var nf = 1 / (near - far);
-    return new Float32Array([
-      f / aspect, 0, 0, 0,
-      0, f, 0, 0,
-      0, 0, (far + near) * nf, -1,
-      0, 0, 2 * far * near * nf, 0,
-    ]);
-  };
-
-  IrisCore.prototype._lookAt = function (eye, center, up) {
-    function norm(v) {
-      var l = Math.hypot(v[0], v[1], v[2]) || 1;
-      return [v[0] / l, v[1] / l, v[2] / l];
-    }
-    function sub(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
-    function cross(a, b) {
-      return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-    }
-    function dot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
-    var z = norm(sub(eye, center));
-    var x = norm(cross(up, z));
-    var y = cross(z, x);
-    return new Float32Array([
-      x[0], y[0], z[0], 0,
-      x[1], y[1], z[1], 0,
-      x[2], y[2], z[2], 0,
-      -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
-    ]);
-  };
-
-  IrisCore.prototype._rotY = function (a) {
-    var c = Math.cos(a), s = Math.sin(a);
-    return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
   };
 
   window.IrisCore = IrisCore;
