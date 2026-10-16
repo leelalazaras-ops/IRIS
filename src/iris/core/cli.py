@@ -7,12 +7,13 @@ import json
 import sys
 import signal
 import re
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Callable
 
 from iris.ai.service import AIService
 from iris.ai.exceptions import AIError, ConfigurationError
 from iris.tools.registry import ToolRegistry
 from iris.tools.orchestration import ToolOrchestrator, OrchestrationConfig, ToolCall
+from iris.tools.base import ToolResult
 from iris.tools.schemas import ToolSchemaConverter
 from iris.tools.filesystem import (
     ListDirectoryTool,
@@ -61,6 +62,10 @@ class IRISConversation:
         )
         self.tools_enabled = True  # Can be toggled by user
         self.voice_mode = False  # Voice mode toggle, default OFF
+        # Optional UI hook: receives voice lifecycle events from real TTS calls.
+        # Event strings: "speak_start", "speak_end". Defaults to None so the
+        # CLI behaves exactly as before when no UI is attached.
+        self.on_voice_event: Optional[Callable[[str], None]] = None
 
         # Phase 7: Intent & Action Engine components
         self.safety_classifier = SafetyClassifier(self.tool_registry)
@@ -177,7 +182,11 @@ class IRISConversation:
             # Phase 8E: Text-to-speech integration
             if self.voice_mode and speak_text is not None:
                 try:
+                    if self.on_voice_event:
+                        self.on_voice_event("speak_start")
                     speak_text(response)
+                    if self.on_voice_event:
+                        self.on_voice_event("speak_end")
                 except Exception:
                     # TTS failure must be handled safely - IRIS must not crash
                     # The text response is still available in the terminal above

@@ -6,6 +6,8 @@ request tool execution in a safe, controlled manner. All tool execution
 goes through the existing Phase 3 ToolRegistry with full validation.
 """
 
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass, field
 from typing import Optional, Any, TYPE_CHECKING

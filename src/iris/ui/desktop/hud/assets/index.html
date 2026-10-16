@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IRIS Command Center</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="scan-overlay" aria-hidden="true"></div>
+
+  <header id="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"></div>
+      <div class="brand-text">
+        <span class="brand-name">IRIS</span>
+        <span class="brand-sub">INTELLIGENT RESPONSIVE INTERACTIVE SYSTEM</span>
+      </div>
+    </div>
+    <div id="status-pills" class="pills" aria-label="system status">
+      <span id="pill-system" class="pill" data-tv="system_status"><span class="pill-label">SYS</span><span class="pill-value">N/A</span></span>
+      <span id="pill-ai" class="pill" data-tv="ai_status"><span class="pill-label">AI</span><span class="pill-value">N/A</span></span>
+      <span id="pill-aiengine" class="pill pill-wide" data-tv="ai_engine"><span class="pill-label">ENGINE</span><span class="pill-value">N/A</span></span>
+      <span id="pill-voice" class="pill" data-tv="voice"><span class="pill-label">VOICE</span><span class="pill-value">N/A</span></span>
+      <span id="pill-tools" class="pill" data-tv="tools"><span class="pill-label">TOOLS</span><span class="pill-value">N/A</span></span>
+      <span id="pill-action" class="pill" data-tv="action_state"><span class="pill-label">ACTION</span><span class="pill-value">IDLE</span></span>
+      <span id="pill-dry" class="pill pill-dry" data-tv="dry_run"><span class="pill-label">DRY</span><span class="pill-value">OFF</span></span>
+      <span id="pill-clock" class="pill pill-clock"><span class="pill-value" id="utc-clock">--:--:--</span><span class="pill-label">UTC</span></span>
+    </div>
+  </header>
+
+  <div id="layout">
+    <nav id="navrail" aria-label="workspace views">
+      <button class="nav-btn active" data-view="core" title="AI Core (Ctrl+1)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">CORE</span>
+      </button>
+      <button class="nav-btn" data-view="console" title="Console (Ctrl+2)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">CHAT</span>
+      </button>
+      <button class="nav-btn" data-view="telemetry" title="Telemetry (Ctrl+3)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">TELEM</span>
+      </button>
+      <button class="nav-btn" data-view="security" title="Security (Ctrl+4)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">SEC</span>
+      </button>
+      <button class="nav-btn" data-view="events" title="Event Log (Ctrl+5)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">EVENTS</span>
+      </button>
+      <button class="nav-btn" data-view="diagnostics" title="Diagnostics (Ctrl+6)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">DIAG</span>
+      </button>
+      <div class="nav-spacer"></div>
+      <button class="nav-btn" id="palette-btn" title="Command palette (Ctrl+K, or ⌘K)">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">⌘K</span>
+      </button>
+      <button class="nav-btn" id="settings-btn" title="Settings">
+        <span class="nav-icon" aria-hidden="true"></span><span class="nav-label">SET</span>
+      </button>
+    </nav>
+
+    <main id="workspace">
+      <!-- CORE -->
+      <section class="view active" id="view-core">
+        <div class="core-stage">
+          <canvas id="core-canvas" aria-label="IRIS 3D core"></canvas>
+          <div class="core-overlay">
+            <div class="core-state-line"><span id="core-state-label">IDLE</span><span id="core-origin-badge" class="origin-badge">CORE VISUAL</span></div>
+            <div class="core-readouts">
+              <div class="readout"><span class="ro-label">CPU</span><span class="ro-value" id="ro-cpu">--%</span><span class="ro-origin">LIVE</span></div>
+              <div class="readout"><span class="ro-label">RAM</span><span class="ro-value" id="ro-mem">--%</span><span class="ro-origin">LIVE</span></div>
+              <div class="readout"><span class="ro-label">NET ▼</span><span class="ro-value" id="ro-netdown">-- B/s</span><span class="ro-origin">LIVE</span></div>
+              <div class="readout"><span class="ro-label">NET ▲</span><span class="ro-value" id="ro-netup">-- B/s</span><span class="ro-origin">LIVE</span></div>
+            </div>
+            <div class="core-caveat">Core reacts to real IRIS state. Visual output only — decorative geometry, not data.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CONSOLE -->
+      <section class="view" id="view-console">
+        <div class="panel console-panel">
+          <div class="panel-head"><h2>IRIS CONSOLE</h2><span class="origin-badge">REAL BACKEND</span></div>
+          <div id="chat-log" class="chat-log" data-empty="Send a message — it will go to the real IRIS backend."></div>
+          <div id="confirm-bar" class="confirm-bar hidden">
+            <span>⚠ Action awaiting confirmation</span>
+            <button class="btn btn-cyan" id="btn-confirm">Confirm</button>
+            <button class="btn btn-ghost" id="btn-cancel">Cancel</button>
+          </div>
+          <form id="chat-form" class="chat-inputrow" autocomplete="off">
+            <input id="chat-input" type="text" placeholder="Message IRIS — Enter to send…" />
+            <button class="btn btn-cyan" id="btn-send" type="submit">SEND</button>
+            <button class="btn btn-ghost" id="btn-ptt" type="button" title="Push to talk (needs voice packages + mic)">MIC</button>
+          </form>
+          <div class="console-foot">
+            <span id="chat-status">BOOTING</span><span id="chat-error" class="err"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- TELEMETRY -->
+      <section class="view" id="view-telemetry">
+        <div class="grid-2col">
+          <div class="panel">
+            <div class="panel-head"><h2>CPU</h2><span class="origin-badge">LIVE</span></div>
+            <div class="big-stat"><span id="t-cpu">--</span><span class="unit">%</span></div>
+            <canvas class="spark" id="spark-cpu" height="64"></canvas>
+            <div class="stat-sub" id="t-cpu-sub">cores: -- · freq: --</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>MEMORY</h2><span class="origin-badge">LIVE</span></div>
+            <div class="big-stat"><span id="t-mem">--</span><span class="unit">%</span></div>
+            <canvas class="spark" id="spark-mem" height="64"></canvas>
+            <div class="stat-sub" id="t-mem-sub">used -- of --</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>DISK</h2><span class="origin-badge">LIVE</span></div>
+            <div class="big-stat"><span id="t-disk">--</span><span class="unit">%</span></div>
+            <div class="stat-sub" id="t-disk-sub">used -- of --</div>
+            <div class="stat-sub" id="t-disk-io">I/O: --</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>NETWORK</h2><span class="origin-badge">LIVE</span></div>
+            <div class="big-stat"><span id="t-netdown">--</span><span class="unit" id="t-netdown-u">B/s</span></div>
+            <canvas class="spark" id="spark-net" height="64"></canvas>
+            <div class="stat-sub" id="t-netup">up: --</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>GPU</h2><span class="origin-badge origin-una">UNAVAILABLE?</span></div>
+            <div class="big-stat"><span id="t-gpu">N/A</span><span class="unit">%</span></div>
+            <div class="stat-sub" id="t-gpu-sub">UNAVAILABLE</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>TOP PROCESSES</h2><span class="origin-badge">LIVE</span></div>
+            <table class="mini-table" id="proc-table">
+              <thead><tr><th>PID</th><th>NAME</th><th>CPU%</th><th>MEM%</th></tr></thead>
+              <tbody id="proc-body"><tr><td colspan="4" class="na">--</td></tr></tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>INTERFACES</h2><span class="origin-badge">LIVE</span></div>
+            <div id="iface-list" class="iface-list" data-empty="waiting for telemetry…"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>REFRESH</h2><span class="origin-badge">PREFS</span></div>
+            <label class="pref-row">Telemetry interval
+              <span class="pref-val"><input type="range" id="pref-telem" min="1000" max="10000" step="500" value="2000"><span id="pref-telem-v">2000ms</span></span>
+            </label>
+            <label class="pref-row">Security refresh
+              <span class="pref-val"><input type="range" id="pref-sec" min="2000" max="30000" step="1000" value="5000"><span id="pref-sec-v">5000ms</span></span>
+            </label>
+            <label class="pref-row pref-check"><input type="checkbox" id="pref-motion"><span>Reduce motion</span></label>
+            <div class="stat-sub" id="tele-refreshed">last update: --</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SECURITY -->
+      <section class="view" id="view-security">
+        <div class="grid-2col-narrow">
+          <div class="panel">
+            <div class="panel-head"><h2>LISTENING SOCKETS</h2><span class="origin-badge">OBSERVED</span></div>
+            <div class="toolbar"><input id="sec-search" type="text" placeholder="Search findings, evidence…"><span id="sec-fresh">--</span></div>
+            <table class="mini-table" id="listen-table">
+              <thead><tr><th>PROTO</th><th>ADDR</th><th>PORT</th><th>PROCESS</th></tr></thead>
+              <tbody id="listen-body"><tr><td colspan="4" class="na">--</td></tr></tbody>
+            </table>
+            <div class="filters" id="sev-filters">
+              <button class="sev-filter" data-sev="all">SHOW ALL</button>
+              <button class="sev-filter" data-sev="info">INFO</button>
+              <button class="sev-filter" data-sev="low">LOW</button>
+              <button class="sev-filter" data-sev="medium">MEDIUM</button>
+            </div>
+            <div id="findings-list" class="findings"></div>
+            <div class="sec-caveat" id="sec-caveat">
+              No findings = this rule set found nothing notable on this host.
+              That is not proof of security. Findings are heuristics — unfamiliar
+              processes, ports, or connections are not automatically malicious.
+            </div>
+            <div class="toolbar bottom">
+              <button class="btn btn-cyan" id="btn-export-md">EXPORT .MD</button>
+              <button class="btn btn-ghost" id="btn-export-json">EXPORT .JSON</button>
+              <button class="btn btn-ghost" id="btn-sec-refresh">REFRESH NOW</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>INTERFACES & CONNECTIONS</h2><span class="origin-badge">OBSERVED</span></div>
+            <div id="sec-ifaces" class="iface-list" data-empty="waiting for security poll…"></div>
+            <div class="panel-head small"><h2>ACTIVE TCP</h2><span class="origin-badge">OBSERVED</span></div>
+            <table class="mini-table" id="conn-table">
+              <thead><tr><th>LADDR</th><th>REMOTE</th><th>STATE</th><th>PROCESS</th></tr></thead>
+              <tbody id="conn-body"><tr><td colspan="4" class="na">--</td></tr></tbody>
+            </table>
+            <div class="sec-caveat">
+              Read-only observability. IRIS never terminates processes,
+              changes firewall or system settings, or runs external scans.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- EVENTS -->
+      <section class="view" id="view-events">
+        <div class="panel full">
+          <div class="panel-head">
+            <h2>EVENT TIMELINE <span class="origin-badge">DERIVED</span></h2>
+            <div class="toolbar">
+              <button class="btn btn-ghost" id="btn-feed-pause">PAUSE</button>
+              <input id="event-search" type="text" placeholder="Filter…">
+            </div>
+          </div>
+          <div id="event-feed" class="event-feed" data-empty="Events appear as the security poller observes listener changes. Needs at least two polls."></div>
+        </div>
+      </section>
+
+      <!-- DIAGNOSTICS -->
+      <section class="view" id="view-diagnostics">
+        <div class="panel full">
+          <div class="panel-head"><h2>DIAGNOSTICS</h2><span class="origin-badge">REAL</span></div>
+          <div class="diag-grid" id="diag-grid" data-empty="Collecting diagnostics…"></div>
+          <div class="panel-head small"><h2>HISTORY SEARCH (SESSION)</h2><span class="origin-badge">LIVE</span></div>
+          <div class="toolbar"><input id="hist-search" type="text" placeholder="Search events & session history…"></div>
+          <div id="hist-results" class="hist-results" data-empty=""></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings">
+        <div class="panel full">
+          <div class="panel-head"><h2>SETTINGS</h2><span class="origin-badge">UI ONLY</span></div>
+          <label class="pref-row pref-check"><input type="checkbox" id="pref-motion2"><span>Reduce motion (disables scanline/animated backgrounds, keeps core readable)</span></label>
+          <label class="pref-row">Telemetry interval
+            <span class="pref-val"><input type="range" id="pref-telem2" min="1000" max="10000" step="500" value="2000"><span id="pref-telem2-v">2000ms</span></span>
+          </label>
+          <div class="stat-sub">Preferences persist in this UI only (localStorage). Backend refresh settings apply live.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- COMMAND PALETTE -->
+  <div id="palette-overlay" class="hidden" role="dialog" aria-label="command palette">
+    <div id="palette">
+      <input id="palette-input" type="text" placeholder="Type a command… (⌘K / Ctrl+K)">
+      <div id="palette-list"></div>
+    </div>
+  </div>
+
+  <footer id="ticker">
+    <span id="tick-left">IRIS COMMAND CENTER</span>
+    <span id="tick-data">DATA: LIVE (psutil) · findings are heuristics, not verdicts</span>
+  </footer>
+
+  <div id="fallback-banner" class="hidden">
+    WebGL unavailable — 2D core fallback active. Full 3D disabled.
+  </div>
+
+  <script src="js/qwebchannel.js"></script>
+  <script src="js/core3d.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
