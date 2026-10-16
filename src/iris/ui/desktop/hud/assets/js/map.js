@@ -154,7 +154,7 @@
               state.failedOnce = true;
               setStatus(state.offline
                 ? "OFFLINE — live tile fetch paused; placeholder grid shown"
-                : "TILE FETCH FAILED — network error or tile server unreachable", "bad");
+                : "TILE FETCH FAILED — network error, tile server unreachable, or rate-limited (RELOAD to retry)", "bad");
             }
           };
           img.alt = "";

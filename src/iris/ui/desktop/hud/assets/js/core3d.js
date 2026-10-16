@@ -40,7 +40,7 @@
     this.stateName = "disconnected";
     this.target = STATES.disconnected;
     this.current = Object.assign({}, STATES.disconnected);
-    this.mode = "none";            // "webgl2" | "webgl1" | "2d"
+    this.mode = null;              // null | "webgl2" | "webgl1" | "2d"
     this.quality = "high";         // "high" | "reduced"
     this.fps = 0;                  // rolling display estimate
     this._rot = 0;                 // Y rotation accumulated
@@ -83,11 +83,29 @@
   IrisCore.prototype.start = function () {
     if (this._running) return true;
     if (!this.mode) {
-      if (!this._initGL() && !this._init2D()) return false;
+      // Try WebGL first; only fall back to 2D if it cannot initialise.
+      if (this._initGL()) {
+        // fall through to a first draw below (mode set by _initGL)
+      } else if (!this._init2D()) {
+        this.mode = null;
+        this._running = false;
+        // Surface failure explicitly; app shows the 2D-fallback banner
+        // and reports UNAVAILABLE (not a silent blank canvas).
+        this.onModeChange(null, this._rendererInfo || "no rendering backend");
+        return false;
+      }
     }
     this._running = true;
     this._updateRunning();
     this.onModeChange(this.mode, this._rendererInfo);
+    // Draw one frame synchronously so the globe is visible immediately
+    // after start(), rather than waiting for the first rAF tick (rAF can
+    // be delayed when the window is offscreen or just restored).
+    try {
+      this._frame(performance.now());
+    } catch (e) {
+      console.warn("IRIS core first-frame failed:", e);
+    }
     return true;
   };
 
@@ -299,9 +317,14 @@
     gl.bufferData(gl.ARRAY_BUFFER, parts, gl.STATIC_DRAW);
 
     gl.enable(gl.BLEND);
+    // NOTE: back-face culling intentionally DISABLED — the sphere's
+    // triangle winding is assumed-front but not guaranteed CCW-outward,
+    // and with depth testing + an opaque core surface the back faces are
+    // occluded anyway. Culling would silently cull the visible surface
+    // if winding were wrong; rendering both faces cannot produce a
+    // hollow globe.
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
+    gl.disable(gl.CULL_FACE);
 
     // Fixed static viewspace-dependent pieces, built once.
     this._tilt = 23.4 * Math.PI / 180.0;
@@ -375,12 +398,15 @@
       verts.push(x, y, z, x / radius, y / radius, z / radius);
       count++;
     }
+    // Quad grid over (th, ph). Winding is not relied upon for correctness:
+    // the renderer keeps back-face culling DISABLED (see _initGL), so both
+    // orientations render; depth testing resolves front/back visibility.
     for (var y = 0; y < rows; y++) {
       var th0 = (y / rows) * Math.PI, th1 = ((y + 1) / rows) * Math.PI;
       for (var x = 0; x < seg; x++) {
         var ph0 = (x / seg) * 2 * Math.PI, ph1 = ((x + 1) / seg) * 2 * Math.PI;
-        push(th0, ph0); push(th1, ph0); push(th0, ph1);
-        push(th0, ph1); push(th1, ph0); push(th1, ph1);
+        push(th0, ph0); push(th1, ph1); push(th0, ph1);
+        push(th0, ph0); push(th1, ph0); push(th1, ph1);
       }
     }
     return { array: verts, positionCount: count };
@@ -398,8 +424,22 @@
   };
 
   IrisCore.prototype._draw2d = function (t) {
+    // Sync the backing buffer to the CSS size once here — the WebGL path
+    // never runs in this mode, so without this the fallback ring draws
+    // at the stale 300x150 default inside a much larger canvas box.
+    var cssW = this.canvas.clientWidth, cssH = this.canvas.clientHeight;
+    if (cssW > 0 && cssH > 0) {
+      var dpr = Math.min(1.5, this._reducedMotion ? 1 : (window.devicePixelRatio || 1));
+      var bw = Math.floor(cssW * dpr), bh = Math.floor(cssH * dpr);
+      if (this.canvas.width !== bw || this.canvas.height !== bh) {
+        this.canvas.width = bw;
+        this.canvas.height = bh;
+      }
+    }
     var ctx = this.ctx2d;
     var W = this.canvas.width, H = this.canvas.height;
+    var d = (W / Math.max(1, cssW)) || 1; // draw in device px (as before)
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     var cx = W / 2, cy = H / 2;
     var R = Math.min(W, H) * 0.22;

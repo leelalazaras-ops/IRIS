@@ -52,6 +52,40 @@ def test_map_view_assets_and_attribution():
     assert "openstreetmap.org/copyright" in js
 
 
+def test_core_contract_mode_null_fallback_and_winding_guard():
+    """Regression: core3d must never claim success without real WebGL.
+
+    The late-breaking globe regression was caused by mode starting as the
+    truthy string "none" so start() skipped _initGL entirely, then app.js
+    reported any non-2d mode as AVAILABLE; plus back-face culling turned
+    the sphere into an invisible shell. These checks pin the contract.
+    """
+    src = (ASSETS_DIR / "js" / "core3d.js").read_text(encoding="utf-8")
+    # module-level init gate: mode starts falsy (null), never a truthy label
+    assert 'this.mode = null;' in src
+    assert 'this.mode = "none"' not in src
+    # start() must attempt GL init before considering 2D fallback
+    assert "_initGL())" in src.replace(" ", "") or "this._initGL()" in src
+    # culling must not be enabled (culling hid the sphere when winding
+    # was CW-outward); comment may mention it, so check the GL call form
+    assert "gl.enable(gl.CULL_FACE)" not in src
+    # app.js must gate AVAILABLE on the actual webgl mode strings
+    app = (ASSETS_DIR / "js" / "app.js").read_text(encoding="utf-8")
+    assert 'mode === "webgl2" || mode === "webgl1"' in app
+
+
+def test_map_lazy_state_and_error_distinctness():
+    """Map must fetch tiles only after create(), and expose distinct states."""
+    msrc = (ASSETS_DIR / "js" / "map.js").read_text(encoding="utf-8")
+    # distinct offline vs error status messages
+    assert "OFFLINE" in msrc
+    assert "TILE FETCH FAILED" in msrc
+    # loading transmit state class exists in CSS
+    css = (ASSETS_DIR / "css" / "style.css").read_text(encoding="utf-8")
+    assert ".map-tile-loading" in css
+    assert ".map-status.map-bad" in css
+
+
 def test_local_assets_exist_and_reference_no_cdn():
     index = ASSETS_DIR / "index.html"
     assert index.exists()

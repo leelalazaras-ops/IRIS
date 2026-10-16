@@ -89,19 +89,41 @@
 
   function coreInit() {
     const canvas = $("core-canvas");
-    if (!canvas || !window.IrisCore) return;
+    if (!canvas || !window.IrisCore) {
+      pushSystem("CORE VIEW: renderer module failed to load (core3d.js).");
+      return;
+    }
     core = new window.IrisCore(canvas, (mode, info) => {
-      if (mode === "2d") {
+      // Strict reporting: only a genuinely initialised WebGL backend
+      // ("webgl2"|"webgl1") counts as AVAILABLE; null (total init
+      // failure) and "2d" both surface the fallback banner instead.
+      const ok = mode === "webgl2" || mode === "webgl1";
+      if (!ok) {
         $("fallback-banner").classList.remove("hidden");
-        bridge && bridge.invoke("report_webgl", JSON.stringify({ available: false, detail: "2D fallback: " + String(info || "").slice(0, 60) }));
+        const label = mode === "2d"
+          ? "WebGL unavailable — 2D core fallback active. Full 3D disabled."
+          : "Core renderer failed to initialise — no 3D and no 2D (" + String(info || "unknown").slice(0, 80) + ").";
+        const banner = $("fallback-banner");
+        banner.textContent = label;
+        bridge && bridge.invoke("report_webgl", JSON.stringify({
+          available: false,
+          detail: mode === "2d" ? "2D fallback: " + String(info || "").slice(0, 60)
+                                 : "init failure: " + String(info || "").slice(0, 60),
+        }));
       } else {
         $("fallback-banner").classList.add("hidden");
-        bridge && bridge.invoke("report_webgl", JSON.stringify({ available: true, detail: mode + ": " + String(info || "").slice(0, 60) }));
+        bridge && bridge.invoke("report_webgl", JSON.stringify({
+          available: true,
+          detail: mode + ": " + String(info || "").slice(0, 60),
+        }));
       }
       syncCoreState();
     });
     core.setReducedMotion(PREFS.reduced);
-    core.start();
+    const started = core.start();
+    if (!started) {
+      pushSystem("CORE: renderer could not start (" + (core._rendererInfo || "no mode") + ").");
+    }
   }
 
   function syncCoreState() {
