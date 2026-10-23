@@ -64,19 +64,66 @@
     <main id="workspace">
       <!-- CORE -->
       <section class="view active" id="view-core">
-        <div class="core-stage">
-          <canvas id="core-canvas" aria-label="IRIS 3D core"></canvas>
-          <div class="core-overlay">
-            <div class="core-state-line"><span id="core-state-label">IDLE</span><span id="core-origin-badge" class="origin-badge">CORE VISUAL</span></div>
-            <div class="core-readouts">
-              <div class="readout"><span class="ro-label">CPU</span><span class="ro-value" id="ro-cpu">--%</span><span class="ro-origin">LIVE</span></div>
-              <div class="readout"><span class="ro-label">RAM</span><span class="ro-value" id="ro-mem">--%</span><span class="ro-origin">LIVE</span></div>
-              <div class="readout"><span class="ro-label">NET ▼</span><span class="ro-value" id="ro-netdown">-- B/s</span><span class="ro-origin">LIVE</span></div>
-              <div class="readout"><span class="ro-label">NET ▲</span><span class="ro-value" id="ro-netup">-- B/s</span><span class="ro-origin">LIVE</span></div>
+        <div class="core-grid">
+          <aside class="core-col core-col-left">
+            <div class="panel mini-panel">
+              <div class="panel-head"><h2>SYSTEM TELEMETRY</h2><span class="origin-badge">LIVE</span></div>
+              <div class="tele-rows">
+                <div class="tele-row"><span class="tele-key">CPU</span><span class="tele-bar"><i id="bar-cpu"></i></span><span class="tele-val" id="ro-cpu">--%</span></div>
+                <div class="tele-row"><span class="tele-key">MEM</span><span class="tele-bar"><i id="bar-mem"></i></span><span class="tele-val" id="ro-mem">--%</span></div>
+                <div class="tele-row"><span class="tele-key">DISK</span><span class="tele-bar"><i id="bar-disk"></i></span><span class="tele-val" id="ro-disk">--%</span></div>
+                <div class="tele-row"><span class="tele-key">NET ▼</span><span class="tele-bar tele-bar-soft"><i id="bar-netdown"></i></span><span class="tele-val" id="ro-netdown">-- B/s</span></div>
+                <div class="tele-row"><span class="tele-key">NET ▲</span><span class="tele-bar tele-bar-soft"><i id="bar-netup"></i></span><span class="tele-val" id="ro-netup">-- B/s</span></div>
+              </div>
+              <canvas class="spark spark-thin" id="spark-cpu" height="42" aria-hidden="true"></canvas>
+              <div class="stat-sub" id="core-tel-updated">awaiting telemetry…</div>
             </div>
-            <div class="core-caveat">Core reacts to real IRIS state. Visual output only — decorative geometry, not data.</div>
+            <div class="panel mini-panel">
+              <div class="panel-head"><h2>CORE RENDER</h2><span class="origin-badge" id="core-mode-badge">—</span></div>
+              <div class="tele-rows">
+                <div class="tele-row"><span class="tele-key">MODE</span><span class="tele-val tele-val-dim" id="core-render-mode">—</span></div>
+                <div class="tele-row"><span class="tele-key">FPS</span><span class="tele-val tele-val-dim" id="core-render-fps">—</span></div>
+              </div>
+              <div class="stat-sub">Core reacts to real IRIS state. Visual output only — decorative geometry, not data.</div>
+            </div>
+          </aside>
+
+          <div class="core-stage">
+            <canvas id="core-canvas" aria-label="IRIS 3D core"></canvas>
+            <div class="core-overlay">
+              <div class="core-state-line"><span id="core-state-label">IDLE</span><span id="core-origin-badge" class="origin-badge">CORE VISUAL</span></div>
+              <div class="core-coords" aria-hidden="true">
+                <span>RA +0421.88 · DEC −16.42</span><span>ALT 705KM · EPOCH J2000</span>
+              </div>
+            </div>
           </div>
+
+          <aside class="core-col core-col-right">
+            <div class="panel mini-panel">
+              <div class="panel-head"><h2>INTELLIGENCE</h2><span class="origin-badge">STATE</span></div>
+              <div class="tele-rows">
+                <div class="tele-row tele-st"><span class="tele-key">BACKEND</span><span class="tele-value" id="core-backend" data-tv="system_status">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">AI ENGINE</span><span class="tele-value" id="core-ai" data-tv="ai_status">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">PROVIDER</span><span class="tele-value tele-val-dim" id="core-engine" data-tv="ai_engine">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">TOOLS</span><span class="tele-value" id="core-tools" data-tv="tools">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">ACTION</span><span class="tele-value" id="core-action" data-tv="action_state">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">VOICE</span><span class="tele-value" id="core-voice" data-tv="voice">—</span></div>
+                <div class="tele-row tele-st"><span class="tele-key">DRY RUN</span><span class="tele-value" id="core-dry" data-tv="dry_run">—</span></div>
+              </div>
+            </div>
+            <div class="panel mini-panel">
+              <div class="panel-head"><h2>RECENT ACTIVITY</h2><span class="origin-badge">OBSERVED</span></div>
+              <div id="core-feed" class="mini-feed" data-empty="no observed events yet"></div>
+            </div>
+          </aside>
         </div>
+
+        <footer class="core-strip">
+          <span id="core-strip-backend">BACKEND: —</span>
+          <span id="core-strip-view">VIEW: CORE</span>
+          <span id="core-strip-updated">LAST UPDATE: —</span>
+          <span id="core-strip-note">local render · no live AI activity implied</span>
+        </footer>
       </section>
 
       <!-- CONSOLE -->

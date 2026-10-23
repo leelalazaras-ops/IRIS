@@ -117,6 +117,17 @@
           detail: mode + ": " + String(info || "").slice(0, 60),
         }));
       }
+      // Core "CORE RENDER" signature card: honest, compact renderer info.
+      setText("core-render-mode", ok ? String(info || mode).toUpperCase()
+                                     : (String(mode || "unavailable").toUpperCase()));
+      const badge = $("core-mode-badge");
+      if (badge) {
+        const txt = ok ? "ACTIVE 3D" : (mode === "2d" ? "2D FALLBACK" : "UNAVAILABLE");
+        if (badge.textContent !== txt) {
+          badge.textContent = txt;
+          badge.classList.toggle("origin-una", !ok);
+        }
+      }
       syncCoreState();
     });
     core.setReducedMotion(PREFS.reduced);
@@ -126,8 +137,16 @@
     }
   }
 
+  // Network bars: psutil byte rates vary wildly; scale on a soft 20 MB/s
+  // cap so typical sessions keep meaningful movement.
+  function clampNetBar(bytes) {
+    const n = Number(bytes) || 0;
+    return Math.min(100, (n / (20 * 1024 * 1024)) * 100);
+  }
+
   function syncCoreState() {
     if (!core) return;
+    setText("core-render-fps", core.fps ? core.fps + " FPS" : "—");
     let coreState = "idle";
     const b = state.backend || {};
     if (b.system_status === "OFFLINE") coreState = "disconnected";
@@ -364,6 +383,7 @@
       v.classList.remove("active"));
     const view = $("view-" + name);
     if (view) view.classList.add("active");
+    setText("core-strip-view", "VIEW: " + name.toUpperCase());
     // Core rAF loop only runs while its view is actually visible.
     if (core && core.setPaused) core.setPaused(name !== "core");
   // The map is lazy: first open initialises tiles (no fetch before that).
@@ -408,6 +428,32 @@
     return cls || "";
   }
 
+  // Core-screen intelligence mirrors of the real header state.
+  const CORE_IDS = {
+    system_status: "core-backend",
+    ai_status: "core-ai",
+    ai_engine: "core-engine",
+    tools: "core-tools",
+    action_state: "core-action",
+    voice: "core-voice",
+    dry_run: "core-dry",
+  };
+  const _coreCache = {};
+  function renderCoreState() {
+    if (!state.backend) return;
+    Object.keys(CORE_IDS).forEach((key) => {
+      const el = $(CORE_IDS[key]);
+      if (!el) return;
+      const value = state.backend[key] === undefined ? "N/A" : String(state.backend[key]);
+      if (_coreCache[key] === value) return;
+      _coreCache[key] = value;
+      el.textContent = value;
+      el.className = "tele-value " + pillFor(value);
+    });
+    setText("core-strip-backend", "BACKEND: " +
+      (state.backend.system_status || "—"));
+  }
+
   function renderState() {
     if (!state.backend) return;
     Object.keys(PILL_IDS).forEach((key) => {
@@ -421,6 +467,7 @@
     // confirm bar
     const awaiting = (state.backend.action_state || "").includes("AWAITING");
     $("confirm-bar").classList.toggle("hidden", !awaiting);
+    renderCoreState();
     syncCoreState();
   }
 
@@ -464,6 +511,16 @@
     _htmlCache.set(id, value);
     el.innerHTML = value;
   }
+  // style diff cache for shrunk bars on the Core screen.
+  const _styleCache = new Map();
+  function setBarWidth(id, pct) {
+    const el = $(id);
+    if (!el) return;
+    const v = pct == null ? "0" : String(Math.max(0, Math.min(100, pct)).toFixed(1));
+    if (_styleCache.get(id) === v) return;
+    _styleCache.set(id, v);
+    el.style.width = v + "%";
+  }
   function renderTelemetry(tel) {
     if (!tel) return;
     state.lastTel = tel;
@@ -477,6 +534,16 @@
     setText("ro-mem", isUnavailable(mem.percent) ? "N/A" : mem.percent + "%");
     setText("ro-netdown", isUnavailable(net.down_bytes_sec) ? "N/A" : fmtBytes(net.down_bytes_sec) + "/s");
     setText("ro-netup", isUnavailable(net.up_bytes_sec) ? "N/A" : fmtBytes(net.up_bytes_sec) + "/s");
+
+    // Core-screen mini bars + status strip (same data, no extra polling)
+    setBarWidth("bar-cpu", isUnavailable(cpu.percent) ? 0 : cpu.percent);
+    setBarWidth("bar-mem", isUnavailable(mem.percent) ? 0 : mem.percent);
+    setBarWidth("bar-disk", isUnavailable(disk.percent) ? 0 : disk.percent);
+    setBarWidth("bar-netdown", isUnavailable(net.down_bytes_sec) ? 0 : clampNetBar(net.down_bytes_sec));
+    setBarWidth("bar-netup", isUnavailable(net.up_bytes_sec) ? 0 : clampNetBar(net.up_bytes_sec));
+    setText("ro-disk", isUnavailable(disk.percent) ? "N/A" : disk.percent + "%");
+    setText("core-tel-updated", "last update: " + (tel.timestamp || "--"));
+    setText("core-strip-updated", "LAST UPDATE: " + (tel.timestamp || "--"));
 
     setText("t-cpu", isUnavailable(cpu.percent) ? "N/A" : String(cpu.percent));
     setText("t-cpu-sub", "cores: " + (cpu.core_count ?? "N/A") +
@@ -700,27 +767,43 @@
 
   function renderEvents() {
     const feed = $("event-feed");
-    if (!feed) return;
     const q = ($("event-search").value || "").toLowerCase();
     const shown = state.events.filter((e) =>
       !q || (e.detail + " " + e.kind).toLowerCase().includes(q));
-    feed.innerText = "";
-    if (!shown.length) {
-      feed.setAttribute("data-empty", q
-        ? "No matching events."
-        : "Events appear when the security poller observes listener changes between two polls. Timestamps are UTC.");
-    } else {
-      feed.removeAttribute("data-empty");
-      shown.slice(-200).forEach((e) => {
-        const row = document.createElement("div");
-        row.className = "event-row";
-        row.innerHTML =
-          "<span class='event-ts'>" + esc(e.timestamp) + "</span>" +
-          "<span class='event-kind'>" + esc(e.kind) + "</span>" +
-          "<span class='event-detail'>" + esc(e.detail) + "</span>";
-        feed.appendChild(row);
-      });
-      feed.scrollTop = feed.scrollHeight;
+    if (feed) {
+      feed.innerText = "";
+      if (!shown.length) {
+        feed.setAttribute("data-empty", q
+          ? "No matching events."
+          : "Events appear when the security poller observes listener changes between two polls. Timestamps are UTC.");
+      } else {
+        feed.removeAttribute("data-empty");
+        shown.slice(-200).forEach((e) => {
+          const row = document.createElement("div");
+          row.className = "event-row";
+          row.innerHTML =
+            "<span class='event-ts'>" + esc(e.timestamp) + "</span>" +
+            "<span class='event-kind'>" + esc(e.kind) + "</span>" +
+            "<span class='event-detail'>" + esc(e.detail) + "</span>";
+          feed.appendChild(row);
+        });
+        feed.scrollTop = feed.scrollHeight;
+      }
+    }
+    // Core-screen mini mirror — last 6 observed events, diffed innerHTML.
+    const mini = $("core-feed");
+    if (mini) {
+      const recent = state.events.slice(-6).reverse();
+      if (!recent.length) {
+        mini.setAttribute("data-empty", "no observed events yet");
+        setHtml("core-feed", "");
+      } else {
+        mini.removeAttribute("data-empty");
+        setHtml("core-feed", recent.map((e) =>
+          "<div class='mini-feed-row'><span class='event-ts'>" + esc(e.timestamp) +
+          "</span><span class='event-kind'>" + esc(e.kind) +
+          "</span><span class='event-detail'>" + esc(e.detail) + "</span></div>").join(""));
+      }
     }
   }
 
