@@ -172,6 +172,7 @@
     var f = is3 ? "out vec4 fragColor;" : "";
     var fAssign = is3 ? "fragColor = " : "gl_FragColor = ";
     var fragPre = is3 ? "#version 300 es\nprecision highp float;\n" : "precision mediump float;\n";
+    var texFn = is3 ? "texture" : "texture2D";
 
     // ---------- lit globe: Lambert + specular + procedural surface ----
     this.coreProg = this._program(
@@ -193,6 +194,7 @@
       ${vf} vec3 vN;
       ${vf} vec3 vP;
       uniform float uGlow, uScan, uTime;
+      uniform sampler2D uEarth;
       ${f}
       void main(){
         vec3 N = normalize(vN);
@@ -202,31 +204,41 @@
         float spec = pow(max(dot(reflect(-L, N), V), 0.0), 26.0);
         float limb = 1.0 - 0.55 * pow(1.0 - max(dot(N, V), 0.0), 1.6);
 
-        // cheap procedural detail: lat/long tech grid + breathing bands
-        float lat = vP.y;
-        float lon = atan(vP.z, vP.x);
+        // Procedural Earth albedo baked once in _earthTexture() (oceans,
+        // continents, ice, city-node glows). Object-space position is
+        // used so the map rotates with the globe.
+        vec3 nn = normalize(vP);
+        float u = atan(nn.z, nn.x) * 0.15915494 + 0.5;
+        float w = 0.5 - asin(clamp(nn.y, -1.0, 1.0)) * 0.31830989;
+        vec3 albedo = ${texFn}(uEarth, vec2(u, w)).rgb;
+        float land = smoothstep(0.02, 0.10, albedo.g - albedo.b);
+
+        // lat/long tech grid + breathing bands, accented over land
+        float lon = atan(nn.z, nn.x);
         float grid = 0.0;
-        grid += smoothstep(0.96, 1.0, abs(sin(lat * 14.0))) * 0.28;
-        grid += smoothstep(0.965, 1.0, abs(sin(lon * 18.0))) * 0.22;
-        float bands = 0.5 + 0.5 * sin(lon * 3.0 + vP.y * 5.0 + uTime * 0.35);
+        grid += smoothstep(0.96, 1.0, abs(sin(nn.y * 14.0))) * (0.10 + 0.18 * land);
+        grid += smoothstep(0.965, 1.0, abs(sin(lon * 18.0))) * (0.08 + 0.16 * land);
+        float bands = 0.5 + 0.5 * sin(lon * 3.0 + nn.y * 5.0 + uTime * 0.35);
         float n = sin(vP.x*9.0 + uScan)*sin(vP.y*7.0 - uScan)*sin(vP.z*8.0);
 
-        vec3 deep   = vec3(0.03, 0.09, 0.13);
-        vec3 lit    = vec3(0.10, 0.42, 0.52);
-        vec3 accent = vec3(0.13, 0.82, 0.94);
-        vec3 base = mix(deep, lit, diff * limb);
-        base += accent * grid * (0.25 + 0.35 * diff);
-        base += vec3(0.05, 0.35, 0.10) * bands * 0.14;
+        vec3 accent = vec3(0.16, 0.86, 0.97);
+        // Lambert with a visible floor: the night side stays readable and
+        // the sphere never renders as a dark, near-invisible disc.
+        vec3 litC = albedo * (0.32 + 1.15 * diff * limb);
+        litC += accent * grid * (0.30 + 0.40 * diff);
+        litC += vec3(0.06, 0.35, 0.12) * bands * 0.08 * land;
+        litC += albedo * pow(1.0 - diff, 3.0) * 0.20;   // soft backlight
         float fres = pow(1.0 - max(dot(N, V), 0.0), 2.6);
-        vec3 col = base * (0.85 + 0.30 * uGlow);
+        vec3 col = litC * (0.92 + 0.28 * uGlow);
         col += vec3(0.0, 0.55, 0.75) * fres * (0.55 + 0.35 * uGlow);
-        col += accent * spec * 0.6;
-        col += vec3(0.0, 0.22, 0.28) * abs(n) * 0.22;
-        float alpha = 1.0;
-        ${fAssign}vec4(col, alpha);
+        col += accent * spec * 0.55;
+        col += vec3(0.0, 0.28, 0.34) * abs(n) * 0.16;
+        ${fAssign}vec4(col, 1.0);
       }`
     );
     if (!this.coreProg) { this._initFailure("shader compile failed"); return false; }
+    gl.useProgram(this.coreProg.prog);
+    gl.uniform1i(this.coreProg.uniforms.uEarth, 0);  // sampler on unit 0
 
     // ---------- additive atmosphere rim shell ------------------------
     this.rimProg = this._program(
@@ -287,8 +299,13 @@
 
     // ---------- static geometry (built once, never re-sent) -----------
     var sphere = this._sphereGeometry(1.0, 44);
-    var verts = new Float32Array(sphere.length);
-    verts.set(sphere);
+    // NOTE: _sphereGeometry returns { array, positionCount } — not a plain
+    // array. A previous version read `sphere.length` (undefined on that
+    // object, giving a zero-length Float32Array), which uploaded an empty
+    // buffer while coreCount stayed correct: every triangle collapsed to
+    // the origin and the globe pass drew nothing but the additive
+    // particles survived, matching the "faint particle sphere" report.
+    var verts = new Float32Array(sphere.array);
     this.coreCount = sphere.positionCount;
     this.coreBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.coreBuf);
@@ -298,7 +315,7 @@
     this.shellCount = shell.positionCount;
     this.shellBuf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, this.shellBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(shell), gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(shell.array), gl.STATIC_DRAW);
 
     var N = 1400;
     var parts = new Float32Array(N * 4);
@@ -315,6 +332,9 @@
     this.partCount = N;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuf);
     gl.bufferData(gl.ARRAY_BUFFER, parts, gl.STATIC_DRAW);
+
+    // Procedural Earth albedo — generated once, uploaded once.
+    this._earthTex = this._earthTexture();
 
     gl.enable(gl.BLEND);
     // NOTE: back-face culling intentionally DISABLED — the sphere's
@@ -410,6 +430,166 @@
       }
     }
     return { array: verts, positionCount: count };
+  };
+
+  /* ------------------------------------------------ procedural Earth
+     Built entirely offline at init on a detached 1024x512 canvas:
+     stylised ocean gradient, simplified-but-recognisable continent
+     outlines, polar ice, a faint graticule and baked city-node glows.
+     Uploaded once as a mipmapped texture — no network fetch, no image
+     asset, no dependency, and zero per-frame allocation (perf model
+     unchanged: one extra texture fetch per fragment). */
+
+  var CONTINENTS = [
+    // North America
+    [-168,65, -160,63, -152,59, -146,60, -140,59, -133,55, -127,51, -124,46,
+     -121,38, -117,33, -112,31, -106,29, -100,26, -97,25, -94,29, -90,29,
+     -88,30, -85,30, -82,27, -80,26, -81,31, -76,35, -74,40, -70,42, -66,45,
+     -60,47, -56,52, -62,56, -68,59, -76,62, -78,68, -84,70, -92,71, -102,73,
+     -112,72, -122,71, -132,70, -142,70, -153,71, -163,69],
+    // Greenland
+    [-54,60, -46,61, -40,64, -30,69, -22,72, -20,77, -30,81, -44,83, -58,82,
+     -66,78, -70,73, -64,66],
+    // South America
+    [-79,9, -75,11, -71,12, -64,10, -60,8, -52,5, -50,0, -45,-2, -39,-6,
+     -35,-8, -37,-13, -40,-20, -45,-25, -49,-31, -55,-36, -60,-40, -63,-45,
+     -66,-50, -69,-53, -73,-53, -74,-47, -73,-40, -71,-32, -70,-24, -70,-18,
+     -75,-15, -79,-7, -81,-4, -80,1, -78,6],
+    // Africa
+    [-16,14, -17,21, -13,27, -10,32, -6,36, 0,36, 10,37, 20,33, 26,31,
+     33,31, 35,27, 38,21, 43,13, 48,12, 51,11, 47,4, 42,0, 40,-6, 37,-12,
+     35,-19, 33,-26, 28,-33, 22,-34, 17,-33, 14,-27, 12,-18, 11,-9, 9,-2,
+     5,4, 0,6, -8,4, -13,9],
+    // Eurasia — one coarse ring: Iberia → Mediterranean → Arabia → India
+    // → SE Asia → China → Korea → Siberia → Arctic → Scandinavia → home
+    [-9,43, -9,39, -6,36, 0,39, 4,43, 9,44, 14,42, 18,40, 24,41, 29,41,
+     30,37, 36,36, 35,33, 34,31, 33,30, 36,26, 39,21, 41,16, 43,13, 45,12,
+     49,14, 52,17, 55,20, 57,23, 60,25, 64,25, 67,24, 70,22, 72,19, 74,14,
+     76,9, 78,10, 80,14, 82,17, 84,19, 86,20, 88,22, 90,22, 92,21, 94,18,
+     96,17, 98,14, 100,7, 101,13, 104,11, 106,14, 109,13, 109,17, 108,20,
+     111,21, 114,22, 117,24, 120,26, 122,30, 121,34, 122,38, 124,40, 125,39,
+     126,36, 129,35, 130,38, 131,42, 135,47, 138,51, 141,53, 142,59, 147,59,
+     152,59, 157,61, 162,61, 167,63, 172,65, 178,67, 180,69, 175,71, 165,72,
+     155,73, 145,74, 135,74, 125,75, 115,76, 105,77, 95,78, 85,76, 80,75,
+     75,73, 70,73, 67,70, 63,70, 58,70, 53,70, 48,67, 43,66, 40,66, 37,67,
+     34,69, 32,70, 30,70, 26,70, 22,70, 18,69, 15,67, 13,65, 10,64, 7,62,
+     6,60, 9,58, 11,57, 11,55, 9,54, 6,53, 4,52, 3,51, 1,51, -2,49, -4,48,
+     -2,46, -2,44],
+    // British Isles (coarse blob)
+    [-10,51, -6,50, -1,51, 0,53, -1,56, -5,58, -8,55, -10,54],
+    // Japan
+    [132,34, 137,35, 141,39, 141,42, 145,44, 143,45, 139,41, 136,37, 133,35],
+    // Madagascar
+    [48,-13, 50,-16, 50,-24, 47,-25, 44,-22, 44,-17],
+    // Australia
+    [114,-22, 114,-33, 118,-35, 129,-32, 137,-35, 141,-38, 147,-38, 151,-33,
+     153,-28, 153,-25, 147,-19, 143,-14, 142,-11, 137,-12, 130,-12, 125,-14,
+     121,-19],
+    // Sumatra / Borneo / Java / New Guinea / Philippines
+    [95,6, 104,-6, 107,-6, 97,3],
+    [109,2, 116,5, 118,1, 116,-3, 110,-3, 109,0],
+    [105,-6, 114,-7, 114,-9, 105,-8],
+    [131,-1, 141,-3, 147,-6, 146,-9, 139,-9, 133,-5],
+    [120,18, 122,14, 126,10, 126,6, 122,6, 120,10],
+  ];
+
+  // City network nodes baked into the texture (lon, lat): they rotate
+  // with the globe like real surface features.
+  var CITY_NODES = [
+    [-74,41], [-118,34], [-87,42], [-122,38], [-99,19], [-79,44], [-80,26],
+    [-75,-12], [-47,-24], [-58,-35], [-71,-33], [-74,5],
+    [0,52], [2,49], [-4,40], [13,53], [3,6], [31,30], [28,-26], [18,-34],
+    [38,56], [29,41], [37,36], [51,36], [47,25], [55,25],
+    [73,19], [77,29], [67,25], [91,24], [100,14], [107,-6], [104,1], [121,15],
+    [116,40], [121,31], [114,23], [127,38], [140,36], [77,43],
+    [151,-34], [116,-32], [175,-41], [37,-1],
+  ];
+
+  IrisCore.prototype._earthTexture = function () {
+    var W = 1024, H = 512;
+    var cv = document.createElement("canvas");
+    cv.width = W; cv.height = H;
+    var g2 = cv.getContext("2d");
+    var self = this;
+    function px(lon) { return (lon + 180) / 360 * W; }
+    function py(lat) { return (90 - lat) / 180 * H; }
+
+    // ocean: vertical shade, slightly brighter at the equator
+    var og = g2.createLinearGradient(0, 0, 0, H);
+    og.addColorStop(0, "#03131e");
+    og.addColorStop(0.5, "#063044");
+    og.addColorStop(1, "#03131e");
+    g2.fillStyle = og;
+    g2.fillRect(0, 0, W, H);
+
+    // Antarctica: polar cap band (the ring below the habitable world)
+    g2.fillStyle = "#cfe6ef";
+    g2.fillRect(0, py(-68), W, H - py(-68));
+    var ag = g2.createLinearGradient(0, py(-68), 0, H);
+    ag.addColorStop(0, "rgba(207,230,239,0)");
+    ag.addColorStop(0.35, "rgba(207,230,239,0.85)");
+    g2.fillStyle = ag;
+    g2.fillRect(0, py(-68), W, H - py(-68));
+
+    // continents (fill + cyber coastline)
+    for (var ci = 0; ci < CONTINENTS.length; ci++) {
+      var poly = CONTINENTS[ci];
+      g2.beginPath();
+      for (var i = 0; i < poly.length; i += 2) {
+        var xx = px(poly[i]), yy = py(poly[i + 1]);
+        if (i === 0) g2.moveTo(xx, yy); else g2.lineTo(xx, yy);
+      }
+      g2.closePath();
+      g2.fillStyle = ["#1f7a55", "#2a6b4e", "#23654a"][ci % 3];
+      g2.fill();
+      g2.strokeStyle = "rgba(130, 255, 220, 0.5)";  // g-b > 0.10: still
+      g2.lineWidth = 1.4;                             // classifies as land
+      g2.stroke();
+    }
+
+    // polar ice caps (ocean-band lighting keeps them bright)
+    var igN = g2.createLinearGradient(0, 0, 0, H * 0.09);
+    igN.addColorStop(0, "rgba(235,250,255,0.96)");
+    igN.addColorStop(1, "rgba(235,250,255,0)");
+    g2.fillStyle = igN;
+    g2.fillRect(0, 0, W, H * 0.09);
+
+    // faint graticule every 15 degrees (subtle cyber texture)
+    g2.strokeStyle = "rgba(80, 200, 230, 0.07)";
+    g2.lineWidth = 1;
+    for (var lo = -180; lo <= 180; lo += 15) {
+      g2.beginPath(); g2.moveTo(px(lo), 0); g2.lineTo(px(lo), H); g2.stroke();
+    }
+    for (var la = -75; la <= 75; la += 15) {
+      g2.beginPath(); g2.moveTo(0, py(la)); g2.lineTo(W, py(la)); g2.stroke();
+    }
+
+    // city network nodes: soft halo + bright core ("subtle nodes")
+    for (var n = 0; n < CITY_NODES.length; n++) {
+      var nx = px(CITY_NODES[n][0]), ny = py(CITY_NODES[n][1]);
+      var hg = g2.createRadialGradient(nx, ny, 0, nx, ny, 7);
+      hg.addColorStop(0, "rgba(126, 233, 255, 0.55)");
+      hg.addColorStop(1, "rgba(126, 233, 255, 0)");
+      g2.fillStyle = hg;
+      g2.fillRect(nx - 7, ny - 7, 14, 14);
+      g2.beginPath();
+      g2.fillStyle = "rgba(234, 252, 255, 0.95)";
+      g2.arc(nx, ny, 1.6, 0, 2 * Math.PI);
+      g2.fill();
+    }
+
+    // upload once: POT texture, mipmapped, cheap filtered fetch per frame
+    var gl = self.gl;
+    if (!gl) return null;
+    var tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    return tex;
   };
 
   /* ------------------------------------------------ 2D fallback */
@@ -593,6 +773,12 @@
       this._computeProj();
     }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    // The rim/particle passes leave depthMask(false) set, and WebGL gates
+    // clear(DEPTH_BUFFER_BIT) on the current depth mask — clearing while
+    // writes are off kept last frame's globe depth in the buffer, so after
+    // the very first frame every globe fragment failed the LESS depth test
+    // and the sphere vanished, leaving only the additive particles.
+    gl.depthMask(true);
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 

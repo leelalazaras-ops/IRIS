@@ -9,6 +9,7 @@ not installed so CI without the optional dependency stays green.
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -84,6 +85,40 @@ def test_map_lazy_state_and_error_distinctness():
     css = (ASSETS_DIR / "css" / "style.css").read_text(encoding="utf-8")
     assert ".map-tile-loading" in css
     assert ".map-status.map-bad" in css
+
+
+def test_core_geometry_upload_contract():
+    """Regression: globe must upload real vertex data, never an empty buffer.
+
+    _sphereGeometry returns { array, positionCount }. A past regression
+    built the Float32Array from `sphere.length` (undefined on that
+    object) — uploading a zero-length buffer while coreCount stayed
+    correct, so every triangle collapsed to the origin and the globe
+    pass drew nothing. The same bug existed for the rim shell buffer.
+    """
+    src = (ASSETS_DIR / "js" / "core3d.js").read_text(encoding="utf-8")
+    assert "new Float32Array(sphere.array)" in src
+    assert "new Float32Array(shell.array)" in src
+    # the broken forms must not come back
+    assert "new Float32Array(sphere.length)" not in src
+    assert "new Float32Array(shell)" not in src
+
+
+def test_hud_window_remote_tile_settings():
+    """Regression: both file-URL permission attributes must be set.
+
+    LocalContentCanAccessRemoteUrls defaults to false, which makes
+    Chromium abort every remote tile fetch from the file:// HUD page
+    with no network attempt at all (verified via net-log). Setting it
+    also implicitly flips LocalContentCanAccessFileUrls to false in
+    current QtWebEngine, so both must be asserted explicitly.
+    """
+    src = Path("src/iris/ui/desktop/hud/hud_window.py").read_text(encoding="utf-8")
+    assert "LocalContentCanAccessRemoteUrls, True" in src
+    assert "LocalContentCanAccessFileUrls, True" in src
+    # ordering note: FileUrls must be re-asserted after the remote flag
+    assert (src.find("LocalContentCanAccessRemoteUrls, True")
+            < src.find("LocalContentCanAccessFileUrls, True"))
 
 
 def test_local_assets_exist_and_reference_no_cdn():

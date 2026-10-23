@@ -27,11 +27,13 @@ from PySide6.QtWidgets import QMainWindow
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
     from PySide6.QtWebChannel import QWebChannel
+    from PySide6.QtWebEngineCore import QWebEngineSettings
 
     WEBENGINE_AVAILABLE = True
 except ImportError:
     QWebEngineView = None
     QWebChannel = None
+    QWebEngineSettings = None
     WEBENGINE_AVAILABLE = False
 
 from iris.ui.desktop.backend import IrisWorker
@@ -101,6 +103,22 @@ class IrisHudWindow(QMainWindow):
         index = ASSETS_DIR / "index.html"
         if not index.exists():  # defensive: assets must ship with the app
             raise RuntimeError(f"HUD assets missing: {index}")
+        # The HUD page runs from file:// and the Geo Map view requests
+        # remote OpenStreetMap tiles as subresources. QtWebEngine blocks
+        # local documents from remote URLs by default
+        # (LocalContentCanAccessRemoteUrls = false): each tile request is
+        # killed at the CORS check before any network attempt, so every
+        # tile shows broken on every platform. This is the only remote
+        # content in the HUD; everything else is fully local.
+        #
+        # NOTE (verified empirically): enabling LocalContentCanAccess-
+        # RemoteUrls ALSO flips LocalContentCanAccessFileUrls to False in
+        # this QtWebEngine, which blocks the HUD's own file:// scripts
+        # from loading entirely. Re-assert FileUrls=True after the remote
+        # flag so local scripts AND remote tiles both work.
+        settings = self._view.settings()
+        settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+        settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
         self._view.load(QUrl.fromLocalFile(str(index)))
 
     def _build_menus(self) -> None:
