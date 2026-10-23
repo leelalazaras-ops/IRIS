@@ -117,7 +117,20 @@
       state.tiles.clear();
     }
 
+    // One render pass may batch up to N new tile fetches. This bounds the
+    // burst after a zoom step (typically ~4x viewport tiles) without
+    // blocking interactive panning; remaining tiles fill in on the next
+    // render while kept cross-zoom tiles overlap the gap.
+    const MAX_REQUESTS_PER_RENDER = 24;
+
     // ---- rendering: place visible tiles, drop stale ones
+    //
+    // Cross-zoom backdrop: tiles from older zoom levels are kept visible
+    // (scaled 2^(z - tz)) while the new level's tiles load. Without this,
+    // every zoom step empties the viewport (black screen) until the entire
+    // new tile batch arrives over the network — the reported regression.
+    // Each render re-scales stale tiles to their current zoom-correct
+    // screen size and position so they always appear in the right place.
     function render() {
       const w = wrap.clientWidth || 600;
       const h = wrap.clientHeight || 400;
@@ -126,26 +139,36 @@
 
       const seen = new Set();
       let requested = 0;
-      const tx0 = Math.floor((state.centerX - w / 2) / TILE_SIZE);
-      const tx1 = Math.floor((state.centerX + w / 2) / TILE_SIZE);
-      const ty0 = Math.floor((state.centerY - h / 2) / TILE_SIZE);
-      const ty1 = Math.floor((state.centerY + h / 2) / TILE_SIZE);
+      const w2 = w / 2, h2 = h / 2;
       const n = Math.pow(2, state.zoom);
+      const tx0 = Math.floor((state.centerX - w2) / TILE_SIZE);
+      const tx1 = Math.floor((state.centerX + w2) / TILE_SIZE);
+      const ty0 = Math.floor((state.centerY - h2) / TILE_SIZE);
+      const ty1 = Math.floor((state.centerY + h2) / TILE_SIZE);
       for (let tx = tx0; tx <= tx1; tx++) {
         for (let ty = ty0; ty <= ty1; ty++) {
           const key = state.zoom + "/" + tx + "/" + ty;
           seen.add(key);
           if (state.tiles.has(key)) continue;
           if (ty < 0 || ty >= n) continue; // outside the world vertically
+          if (requested >= MAX_REQUESTS_PER_RENDER) continue; // batched politely
 
           const img = new Image();
           img.decoding = "async";
           img.className = "map-tile map-tile-loading";
-          img.style.left = (tx * TILE_SIZE + w / 2 - state.centerX) + "px";
-          img.style.top = (ty * TILE_SIZE + h / 2 - state.centerY) + "px";
+          img.style.left = (tx * TILE_SIZE + w2 - state.centerX) + "px";
+          img.style.top = (ty * TILE_SIZE + h2 - state.centerY) + "px";
           img.style.width = TILE_SIZE + "px";
           img.style.height = TILE_SIZE + "px";
-          img.onload = () => { img.classList.remove("map-tile-loading"); };
+          img.style.zIndex = "2";
+          img.onload = () => {
+            img.classList.remove("map-tile-loading");
+            if (state.loadErr > 0) state.loadErr -= 1;   // recover gracefully
+            if (state.failedOnce && state.loadErr === 0) {
+              state.failedOnce = false;
+              setStatus("", null);
+            }
+          };
           img.onerror = () => {
             img.classList.remove("map-tile-loading");
             img.classList.add("map-tile-ph");
@@ -169,25 +192,34 @@
         }
       }
 
-      // position/hide tiles; drop repeatedly-unseen ones
+      // position/scale/hide tiles; drop repeatedly-unseen ones
       state.tiles.forEach((entry, key) => {
         const parts = key.split("/");
         const tz = Number(parts[0]);
         const ttx = Number(parts[1]);
         const tty = Number(parts[2]);
-        entry.img.style.left = (ttx * TILE_SIZE + w / 2 - state.centerX) + "px";
-        entry.img.style.top = (tty * TILE_SIZE + h / 2 - state.centerY) + "px";
+        const scale = Math.pow(2, state.zoom - tz);
+        const side = TILE_SIZE * scale;
+        // position in current-zoom world coordinates, scaled per tile level
+        entry.img.style.left = (ttx * side + w2 - state.centerX) + "px";
+        entry.img.style.top = (tty * side + h2 - state.centerY) + "px";
+        entry.img.style.width = side + "px";
+        entry.img.style.height = side + "px";
         if (tz !== state.zoom || !seen.has(key)) {
           entry.keepCount += 1;
-          if (entry.keepCount > 2) {
+          if (entry.keepCount > 3) {
             entry.img.remove();
             state.tiles.delete(key);
           } else {
-            entry.img.style.display = "none";
+            entry.img.style.display = "";
+            entry.img.style.zIndex = "1";   // backdrop below current zoom
+            entry.img.classList.add("map-tile-stale");
           }
         } else {
           entry.keepCount = 0;
           entry.img.style.display = "";
+          entry.img.style.zIndex = "2";
+          entry.img.classList.remove("map-tile-stale");
         }
       });
 
@@ -211,7 +243,10 @@
       state.centerX = worldX * ratio - ax + w / 2;
       state.centerY = worldY * ratio - ay + h / 2;
       state.zoom = next;
-      clearTiles(); // different zoom = different tile pyramid level
+      // keep the previous zoom level visible as a scaled backdrop — the
+      // new level's tiles arrive over the network and paint on top; the
+      // backdrop is dropped after a few renders (keepCount tick-down).
+      // Clearing here was the direct cause of the black-viewport bug.
       render();
     }
 

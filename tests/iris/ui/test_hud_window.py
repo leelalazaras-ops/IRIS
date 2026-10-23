@@ -104,6 +104,43 @@ def test_core_geometry_upload_contract():
     assert "new Float32Array(shell)" not in src
 
 
+def test_map_zoom_keeps_cross_zoom_backdrop():
+    """Regression: zoom must never empty the viewport.
+
+    The reported black screen came from setZoom() calling clearTiles()
+    before any tile of the new zoom level had loaded, so the viewport
+    was 100% blank between the zoom step and the tile arrivals (and
+    every repeated zoom step repeated the blanking). The fix keeps
+    old-zoom tiles visible as a scaled backdrop and never clears on
+    zoom; these checks pin the contract.
+    """
+    msrc = (ASSETS_DIR / "js" / "map.js").read_text(encoding="utf-8")
+    # setZoom must not wipe the tile registry (comment explains why)
+    assert "clearTiles(); // different zoom" not in msrc
+    assert "Clearing here was the direct cause of the black-viewport bug." in msrc
+    # every render must scale stale tiles to their own zoom level
+    assert "Math.pow(2, state.zoom - tz)" in msrc
+    # request bursts stay bounded (OSMF policy + interactive snappiness)
+    assert "MAX_REQUESTS_PER_RENDER" in msrc
+
+
+def test_neural_core_contract():
+    """Regression: Neural Core ships no Earth textures and draws orbits.
+
+    The Earth visualisation was replaced by an emissive Neural Core;
+    these checks make sure the earth texture pipeline cannot creep
+    back and the orbital rings remain part of the render.
+    """
+    src = (ASSETS_DIR / "js" / "core3d.js").read_text(encoding="utf-8")
+    assert "_earthTexture" not in src
+    assert "_cloudTexture" not in src
+    assert "sampler2D" not in src
+    assert "_ringGeometry" in src
+    assert "gl.drawArrays(gl.LINES" in src
+    assert "var CONTINENTS" not in src
+    assert "CITY_NODES" not in src
+
+
 def test_hud_window_remote_tile_settings():
     """Regression: both file-URL permission attributes must be set.
 

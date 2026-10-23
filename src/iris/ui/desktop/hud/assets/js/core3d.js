@@ -172,7 +172,6 @@
     var f = is3 ? "out vec4 fragColor;" : "";
     var fAssign = is3 ? "fragColor = " : "gl_FragColor = ";
     var fragPre = is3 ? "#version 300 es\nprecision highp float;\n" : "precision mediump float;\n";
-    var texFn = is3 ? "texture" : "texture2D";
 
     // ---------- lit globe: Lambert + specular + procedural surface ----
     this.coreProg = this._program(
@@ -194,60 +193,34 @@
       ${vf} vec3 vN;
       ${vf} vec3 vP;
       uniform float uGlow, uScan, uTime;
-      uniform sampler2D uEarth;
-      uniform sampler2D uCloud;
       ${f}
       void main(){
+        // Neural Core: an emissive computational sphere. Bands of activity
+        // sweep the surface (deterministic sines — no textures, no fetch); a
+        // brighter equatorial scan band breathes along Y; a strong fresnel
+        // rim keeps the silhouette legible at any window size.
         vec3 N = normalize(vN);
-        vec3 L = normalize(vec3(-0.45, 0.55, 0.7));
         vec3 V = normalize(vec3(0.0, 0.12, 1.0));
-        float diff = max(dot(N, L), 0.0);
-        float spec = pow(max(dot(reflect(-L, N), V), 0.0), 26.0);
-        float limb = 1.0 - 0.55 * pow(1.0 - max(dot(N, V), 0.0), 1.6);
-
-        // Procedural Earth albedo baked once in _earthTexture() (oceans,
-        // continents, ice, city-node glows). Object-space position is
-        // used so the map rotates with the globe.
-        vec3 nn = normalize(vP);
-        float u = atan(nn.z, nn.x) * 0.15915494 + 0.5;
-        float w = 0.5 - asin(clamp(nn.y, -1.0, 1.0)) * 0.31830989;
-        vec3 albedo = ${texFn}(uEarth, vec2(u, w)).rgb;
-        float land = smoothstep(0.02, 0.10, albedo.g - albedo.b);
-
-        // cloud layer: separate textures drift slowly against the ground
-        float cu = u + uTime * 0.0035;
-        float cloud = ${texFn}(uCloud, vec2(fract(cu), w)).r;
-        cloud += ${texFn}(uCloud, vec2(fract(cu * 1.31 + 0.33), w * 1.06 - 0.03)).r * 0.4;
-        cloud = smoothstep(0.52, 0.86, cloud) * 0.68;
-
-        // restrained meridional accents — far fainter than before
-        float lon = atan(nn.z, nn.x);
-        float grid = 0.0;
-        grid += smoothstep(0.97, 1.0, abs(sin(nn.y * 14.0))) * (0.04 + 0.07 * land);
-        grid += smoothstep(0.975, 1.0, abs(sin(lon * 18.0))) * (0.03 + 0.06 * land);
-        float bands = 0.5 + 0.5 * sin(lon * 3.0 + nn.y * 5.0 + uTime * 0.35);
-        float n = sin(vP.x*9.0 + uScan)*sin(vP.y*7.0 - uScan)*sin(vP.z*8.0);
-
-        vec3 accent = vec3(0.16, 0.86, 0.97);
-        // Lambert with a gentle floor: readable night-side silhouette while
-        // the terminator stays a smooth, convincing gradient.
-        vec3 litC = albedo * (0.22 + 1.15 * diff * limb + 0.14 * diff);
-        litC = mix(litC, vec3(0.92, 0.95, 0.98) * (0.32 + 0.95 * diff * limb), cloud);
-        litC += accent * grid * (0.30 + 0.40 * diff);
-        litC += vec3(0.06, 0.35, 0.12) * bands * 0.08 * land * (1.0 - cloud);
-        litC += albedo * pow(1.0 - diff, 3.0) * 0.18;   // soft backlight
-        float fres = pow(1.0 - max(dot(N, V), 0.0), 2.6);
-        vec3 col = litC * (0.92 + 0.28 * uGlow);
-        col += vec3(0.0, 0.55, 0.75) * fres * (0.55 + 0.35 * uGlow);
-        col += accent * spec * 0.5 * (1.0 - cloud);
-        col += vec3(0.0, 0.28, 0.34) * abs(n) * 0.14 * (1.0 - cloud);
+        float r = length(vP);
+        float fres = pow(1.0 - abs(dot(N, V)), 2.2);
+        float lon = atan(vP.z, vP.x);
+        float bands = 0.5 + 0.5 * sin(lon * 4.0 + vP.y * 6.0 - uTime * 0.9);
+        float latLines = 0.5 + 0.5 * sin(vP.y * 14.0 - uTime * 1.3);
+        latLines = smoothstep(0.86, 1.0, latLines);
+        float puls = 0.5 + 0.5 * sin(uTime * 1.7);
+        float scan = smoothstep(0.5, 0.0, abs(fract(vP.y * 0.30 - uTime * 0.14) - 0.5));
+        vec3 deep = vec3(0.015, 0.07, 0.11);
+        vec3 mid  = vec3(0.05, 0.34, 0.46);
+        vec3 hot  = vec3(0.55, 0.94, 1.0);
+        vec3 col = mix(deep, mid, bands * 0.55 + latLines * 0.25);
+        col += hot * (0.22 + 0.30 * bands + 0.12 * puls) * (1.0 - r * 0.45);
+        col += vec3(0.30, 0.85, 1.00) * scan * 0.30;
+        col += hot * fres * (0.55 + 0.35 * uGlow);
+        col *= (0.72 + 0.38 * uGlow);
         ${fAssign}vec4(col, 1.0);
       }`
     );
     if (!this.coreProg) { this._initFailure("shader compile failed"); return false; }
-    gl.useProgram(this.coreProg.prog);
-    gl.uniform1i(this.coreProg.uniforms.uEarth, 0);  // sampler on unit 0
-    gl.uniform1i(this.coreProg.uniforms.uCloud, 1);  // cloud layer on unit 1
 
     // ---------- additive atmosphere rim shell ------------------------
     this.rimProg = this._program(
@@ -306,6 +279,29 @@
     );
     if (!this.partProg) { this._initFailure("particle shader compile failed"); return false; }
 
+    // ---------- orbital ring lines (additive, thin) ------------------
+    this.ringProg = this._program(
+      glsl + `
+      ${a} vec3 aPos;
+      ${a} float aA;
+      uniform mat4 uProj, uView, uModel;
+      ${v} float vA;
+      void main(){
+        vA = aA;
+        gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
+      }`,
+      fragPre + `
+      ${vf} float vA;
+      uniform float uGlow, uTime, uAccent;
+      ${f}
+      void main(){
+        vec3 col = mix(vec3(0.07, 0.42, 0.52), vec3(0.45, 0.92, 1.0), vA * uAccent);
+        float breathe = 0.72 + 0.28 * sin(uTime * 1.2 + vA * 6.2831);
+        ${fAssign}vec4(col, (0.30 + 0.55 * vA) * breathe * (0.5 + 0.5 * uGlow));
+      }`
+    );
+    if (!this.ringProg) { this._initFailure("ring shader compile failed"); return false; }
+
     // ---------- static geometry (built once, never re-sent) -----------
     var sphere = this._sphereGeometry(1.0, 44);
     // NOTE: _sphereGeometry returns { array, positionCount } — not a plain
@@ -342,9 +338,13 @@
     gl.bindBuffer(gl.ARRAY_BUFFER, this.partBuf);
     gl.bufferData(gl.ARRAY_BUFFER, parts, gl.STATIC_DRAW);
 
-    // Procedural Earth albedo — generated once, uploaded once.
-    this._earthTex = this._earthTexture();
-    this._cloudTex = this._cloudTexture();
+    // Procedural Earth textures removed with the Neural Core rewrite; the
+    // orbital structure below is generated once into a line buffer.
+    var ring = this._ringGeometry();
+    this.ringCount = ring.count;
+    this.ringBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.ringBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ring.array), gl.STATIC_DRAW);
 
     gl.enable(gl.BLEND);
     // NOTE: back-face culling intentionally DISABLED — the sphere's
@@ -357,7 +357,7 @@
     gl.disable(gl.CULL_FACE);
 
     // Fixed static viewspace-dependent pieces, built once.
-    this._tilt = 23.4 * Math.PI / 180.0;
+    this._tilt = 16.0 * Math.PI / 180.0;
     this._computeProj();
 
     var dbg = gl.getExtension("WEBGL_debug_renderer_info");
@@ -442,222 +442,42 @@
     return { array: verts, positionCount: count };
   };
 
-  /* ------------------------------------------------ procedural Earth
-     Built entirely offline at init on a detached 1024x512 canvas:
-     stylised ocean gradient, simplified-but-recognisable continent
-     outlines, polar ice, a faint graticule and baked city-node glows.
-     Uploaded once as a mipmapped texture — no network fetch, no image
-     asset, no dependency, and zero per-frame allocation (perf model
-     unchanged: one extra texture fetch per fragment). */
+  /* ------------------------------------------------ orbital structure
+     Great-circle ring lines around the Neural Core: three tilted orbits
+     with alpha-faded seams, generated once into a line buffer. Cheap
+     gl.LINES draw, no textures, no per-frame allocation. */
 
-  var CONTINENTS = [
-    // North America
-    [-168,65, -160,63, -152,59, -146,60, -140,59, -133,55, -127,51, -124,46,
-     -121,38, -117,33, -112,31, -106,29, -100,26, -97,25, -94,29, -90,29,
-     -88,30, -85,30, -82,27, -80,26, -81,31, -76,35, -74,40, -70,42, -66,45,
-     -60,47, -56,52, -62,56, -68,59, -76,62, -78,68, -84,70, -92,71, -102,73,
-     -112,72, -122,71, -132,70, -142,70, -153,71, -163,69],
-    // Greenland
-    [-54,60, -46,61, -40,64, -30,69, -22,72, -20,77, -30,81, -44,83, -58,82,
-     -66,78, -70,73, -64,66],
-    // South America
-    [-79,9, -75,11, -71,12, -64,10, -60,8, -52,5, -50,0, -45,-2, -39,-6,
-     -35,-8, -37,-13, -40,-20, -45,-25, -49,-31, -55,-36, -60,-40, -63,-45,
-     -66,-50, -69,-53, -73,-53, -74,-47, -73,-40, -71,-32, -70,-24, -70,-18,
-     -75,-15, -79,-7, -81,-4, -80,1, -78,6],
-    // Africa
-    [-16,14, -17,21, -13,27, -10,32, -6,36, 0,36, 10,37, 20,33, 26,31,
-     33,31, 35,27, 38,21, 43,13, 48,12, 51,11, 47,4, 42,0, 40,-6, 37,-12,
-     35,-19, 33,-26, 28,-33, 22,-34, 17,-33, 14,-27, 12,-18, 11,-9, 9,-2,
-     5,4, 0,6, -8,4, -13,9],
-    // Eurasia — one coarse ring: Iberia → Mediterranean → Arabia → India
-    // → SE Asia → China → Korea → Siberia → Arctic → Scandinavia → home
-    [-9,43, -9,39, -6,36, 0,39, 4,43, 9,44, 14,42, 18,40, 24,41, 29,41,
-     30,37, 36,36, 35,33, 34,31, 33,30, 36,26, 39,21, 41,16, 43,13, 45,12,
-     49,14, 52,17, 55,20, 57,23, 60,25, 64,25, 67,24, 70,22, 72,19, 74,14,
-     76,9, 78,10, 80,14, 82,17, 84,19, 86,20, 88,22, 90,22, 92,21, 94,18,
-     96,17, 98,14, 100,7, 101,13, 104,11, 106,14, 109,13, 109,17, 108,20,
-     111,21, 114,22, 117,24, 120,26, 122,30, 121,34, 122,38, 124,40, 125,39,
-     126,36, 129,35, 130,38, 131,42, 135,47, 138,51, 141,53, 142,59, 147,59,
-     152,59, 157,61, 162,61, 167,63, 172,65, 178,67, 180,69, 175,71, 165,72,
-     155,73, 145,74, 135,74, 125,75, 115,76, 105,77, 95,78, 85,76, 80,75,
-     75,73, 70,73, 67,70, 63,70, 58,70, 53,70, 48,67, 43,66, 40,66, 37,67,
-     34,69, 32,70, 30,70, 26,70, 22,70, 18,69, 15,67, 13,65, 10,64, 7,62,
-     6,60, 9,58, 11,57, 11,55, 9,54, 6,53, 4,52, 3,51, 1,51, -2,49, -4,48,
-     -2,46, -2,44],
-    // British Isles (coarse blob)
-    [-10,51, -6,50, -1,51, 0,53, -1,56, -5,58, -8,55, -10,54],
-    // Japan
-    [132,34, 137,35, 141,39, 141,42, 145,44, 143,45, 139,41, 136,37, 133,35],
-    // Madagascar
-    [48,-13, 50,-16, 50,-24, 47,-25, 44,-22, 44,-17],
-    // Australia
-    [114,-22, 114,-33, 118,-35, 129,-32, 137,-35, 141,-38, 147,-38, 151,-33,
-     153,-28, 153,-25, 147,-19, 143,-14, 142,-11, 137,-12, 130,-12, 125,-14,
-     121,-19],
-    // Sumatra / Borneo / Java / New Guinea / Philippines
-    [95,6, 104,-6, 107,-6, 97,3],
-    [109,2, 116,5, 118,1, 116,-3, 110,-3, 109,0],
-    [105,-6, 114,-7, 114,-9, 105,-8],
-    [131,-1, 141,-3, 147,-6, 146,-9, 139,-9, 133,-5],
-    [120,18, 122,14, 126,10, 126,6, 122,6, 120,10],
-  ];
-
-  // City network nodes baked into the texture (lon, lat): they rotate
-  // with the globe like real surface features.
-  var CITY_NODES = [
-    [-74,41], [-118,34], [-87,42], [-122,38], [-99,19], [-79,44], [-80,26],
-    [-75,-12], [-47,-24], [-58,-35], [-71,-33], [-74,5],
-    [0,52], [2,49], [-4,40], [13,53], [3,6], [31,30], [28,-26], [18,-34],
-    [38,56], [29,41], [37,36], [51,36], [47,25], [55,25],
-    [73,19], [77,29], [67,25], [91,24], [100,14], [107,-6], [104,1], [121,15],
-    [116,40], [121,31], [114,23], [127,38], [140,36], [77,43],
-    [151,-34], [116,-32], [175,-41], [37,-1],
-  ];
-
-  IrisCore.prototype._earthTexture = function () {
-    var W = 1024, H = 512;
-    var cv = document.createElement("canvas");
-    cv.width = W; cv.height = H;
-    var g2 = cv.getContext("2d");
-    var self = this;
-    function px(lon) { return (lon + 180) / 360 * W; }
-    function py(lat) { return (90 - lat) / 180 * H; }
-
-    // ocean: vertical shade, slightly brighter at the equator — richer,
-    // deeper blue than the old grey-navy, with a subtle teal equator tint
-    var og = g2.createLinearGradient(0, 0, 0, H);
-    og.addColorStop(0.0, "#04243a");
-    og.addColorStop(0.35, "#083a58");
-    og.addColorStop(0.5, "#0c4a68");
-    og.addColorStop(0.65, "#083a58");
-    og.addColorStop(1.0, "#04243a");
-    g2.fillStyle = og;
-    g2.fillRect(0, 0, W, H);
-
-    // Antarctica: polar cap band (the ring below the habitable world)
-    g2.fillStyle = "#cfe6ef";
-    g2.fillRect(0, py(-68), W, H - py(-68));
-    var ag = g2.createLinearGradient(0, py(-68), 0, H);
-    ag.addColorStop(0, "rgba(207,230,239,0)");
-    ag.addColorStop(0.35, "rgba(207,230,239,0.85)");
-    g2.fillStyle = ag;
-    g2.fillRect(0, py(-68), W, H - py(-68));
-
-    // continents (soft-edged natural landmass with darker inland band)
-    for (var ci = 0; ci < CONTINENTS.length; ci++) {
-      var poly = CONTINENTS[ci];
-      g2.beginPath();
-      for (var i = 0; i < poly.length; i += 2) {
-        var xx = px(poly[i]), yy = py(poly[i + 1]);
-        if (i === 0) g2.moveTo(xx, yy); else g2.lineTo(xx, yy);
+  IrisCore.prototype._ringGeometry = function () {
+    var verts = [];
+    var count = 0;
+    var ORBITS = [
+      { r: 1.34, tilt: 18, alpha: 0.85 },   // low equatorial band
+      { r: 1.58, tilt: -36, alpha: 0.62 },  // counter-inclined orbit
+      { r: 1.94, tilt: 64, alpha: 0.40 },   // outer sparse halo
+    ];
+    for (var oi = 0; oi < ORBITS.length; oi++) {
+      var o = ORBITS[oi];
+      var tilt = (o.tilt * Math.PI) / 180.0;
+      var SEG = 96;
+      for (var s = 0; s < SEG; s++) {
+        var a0 = (s / SEG) * 2 * Math.PI, a1 = ((s + 1) / SEG) * 2 * Math.PI;
+        var pts = [];
+        for (var k = 0; k < 2; k++) {
+          var ang = k ? a1 : a0;
+          var x = Math.cos(ang), z = Math.sin(ang), y = 0;
+          // rotate around X by tilt, around Y by half-degree fade offset
+          var y1 = y * Math.cos(tilt) - z * Math.sin(tilt);
+          var z1 = y * Math.sin(tilt) + z * Math.cos(tilt);
+          // alpha fades toward the trailing half of each segment sweep
+          var t = s / SEG;
+          var alpha = o.alpha * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * Math.PI * 2 - Math.PI / 2)));
+          pts.push(x, y1, z1, alpha);
+        }
+        verts.push.apply(verts, pts);
+        count += 2;
       }
-      g2.closePath();
-      // muted natural land palette — olive, sage, desert tan. Not neon green.
-      var landC = ["#4a6b45", "#5c6e4a", "#6e6743", "#55684b"][ci % 4];
-      // soft coastline: wide low-alpha underdraw acts as anti-aliasing
-      g2.fillStyle = landC;
-      g2.strokeStyle = "rgba(0,0,0,0)";
-      g2.shadowColor = "rgba(38, 82, 96, 0.55)";
-      g2.shadowBlur = 6;
-      g2.fill();
-      g2.shadowBlur = 0;
-      // thin, darker coastline line (was a cyan glow — far too artificial)
-      g2.strokeStyle = "rgba(" + (ci % 2 ? "92,116,88" : "84,104,82") + ", 0.9)";
-      g2.lineWidth = 1.1;
-      g2.stroke();
     }
-
-    // polar ice caps — subtle, dimmer than before; no artificial band
-    var igN = g2.createLinearGradient(0, 0, 0, H * 0.055);
-    igN.addColorStop(0, "rgba(216,232,238,0.72)");
-    igN.addColorStop(1, "rgba(216,232,238,0)");
-    g2.fillStyle = igN;
-    g2.fillRect(0, 0, W, H * 0.055);
-
-    // very faint graticule — graders note the span, not the lines
-    g2.strokeStyle = "rgba(90, 190, 220, 0.045)";
-    g2.lineWidth = 0.7;
-    for (var lo = -180; lo <= 180; lo += 15) {
-      g2.beginPath(); g2.moveTo(px(lo), 0); g2.lineTo(px(lo), H); g2.stroke();
-    }
-    for (var la = -75; la <= 75; la += 15) {
-      g2.beginPath(); g2.moveTo(0, py(la)); g2.lineTo(W, py(la)); g2.stroke();
-    }
-
-    // city network nodes: restrained halo + pinpoint core
-    for (var n = 0; n < CITY_NODES.length; n++) {
-      var nx = px(CITY_NODES[n][0]), ny = py(CITY_NODES[n][1]);
-      var hg = g2.createRadialGradient(nx, ny, 0, nx, ny, 6);
-      hg.addColorStop(0, "rgba(140, 230, 250, 0.35)");
-      hg.addColorStop(1, "rgba(140, 230, 250, 0)");
-      g2.fillStyle = hg;
-      g2.fillRect(nx - 6, ny - 6, 12, 12);
-      g2.beginPath();
-      g2.fillStyle = "rgba(226, 250, 255, 0.85)";
-      g2.arc(nx, ny, 1.3, 0, 2 * Math.PI);
-      g2.fill();
-    }
-
-    // upload once: POT texture, mipmapped, cheap filtered fetch per frame
-    var gl = self.gl;
-    if (!gl) return null;
-    var tex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    return tex;
-  };
-
-  /* Procedural cloud sheet: soft blurred blobs on a 512x256 canvas,
-     baked once at init. Two octaves in the shader drift them slowly
-     against the ground rotation, giving weather-like movement without
-     per-frame GPU cost. No network, no dependency. */
-  IrisCore.prototype._cloudTexture = function () {
-    var W = 512, H = 256;
-    var cv = document.createElement("canvas");
-    cv.width = W; cv.height = H;
-    var g2 = cv.getContext("2d");
-    var self = this;
-    g2.fillStyle = "#000";
-    g2.fillRect(0, 0, W, H);
-    var rng = function (seed) {
-      var x = seed;
-      return function () { x = (x * 1103515245 + 12345) & 0x7fffffff; return x / 0x7fffffff; };
-    }(1337);
-    for (var i = 0; i < 90; i++) {
-      var cx = rng() * W, cy = rng() * H;
-      var rx = 30 + rng() * 90, ry = 10 + rng() * 30;
-      var cg = g2.createRadialGradient(cx, cy, 0, cx, cy, Math.max(rx, ry) * 0.8);
-      var a = 0.10 + rng() * 0.16;
-      cg.addColorStop(0, "rgba(255,255,255," + a + ")");
-      cg.addColorStop(1, "rgba(255,255,255,0)");
-      g2.fillStyle = cg;
-      g2.save();
-      g2.translate(cx, cy);
-      g2.scale(1, ry / rx);
-      g2.beginPath();
-      g2.arc(0, 0, rx, 0, 2 * Math.PI);
-      g2.fill();
-      g2.restore();
-    }
-    var gl = this.gl;
-    if (!gl) return null;
-    var tex = gl.createTexture();
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, cv);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-    gl.generateMipmap(gl.TEXTURE_2D);
-    gl.activeTexture(gl.TEXTURE0);  // leave the default unit active
-    return tex;
+    return { array: verts, count: count };
   };
 
   /* ------------------------------------------------ 2D fallback */
@@ -905,6 +725,29 @@
       gl.enableVertexAttribArray(rp.attrs.aPos);
       gl.vertexAttribPointer(rp.attrs.aPos, 3, gl.FLOAT, false, 0, 0);
       gl.drawArrays(gl.TRIANGLES, 0, this.shellCount);
+    }
+
+    // ---- orbital ring lines (counter-rotating thin orbits) ----------
+    if (this.quality === "high" && !this._reducedMotion) {
+      var ringM = this._mOrbit || (this._mOrbit = new Float32Array(16));
+      // rings rotate independently of the core: slow counter-spin
+      this._spinMat(-this._rot * 0.45);
+      this._mul4(ringM, this._mTilt, this._mSpin);
+      var gp = this.ringProg;
+      gl.useProgram(gp.prog);
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.ringBuf);
+      var gu = gp.uniforms;
+      gl.uniformMatrix4fv(gu.uProj, false, this._mProj);
+      gl.uniformMatrix4fv(gu.uView, false, this._viewCache);
+      gl.uniformMatrix4fv(gu.uModel, false, ringM);
+      gl.uniform1f(gu.uGlow, s.glow);
+      gl.uniform1f(gu.uTime, t);
+      gl.uniform1f(gu.uAccent, this.quality === "reduced" ? 0.4 : 1.0);
+      gl.enableVertexAttribArray(gp.attrs.aPos);
+      gl.vertexAttribPointer(gp.attrs.aPos, 3, gl.FLOAT, false, 16, 0);
+      gl.enableVertexAttribArray(gp.attrs.aA);
+      gl.vertexAttribPointer(gp.attrs.aA, 1, gl.FLOAT, false, 16, 12);
+      gl.drawArrays(gl.LINES, 0, this.ringCount);
     }
 
     // ---- particles (additive points on orbital shells) ---------------

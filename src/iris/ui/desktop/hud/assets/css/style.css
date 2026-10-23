@@ -690,7 +690,8 @@ body.reduced-motion .event-row { animation: none; }
   filter: saturate(0.55) brightness(0.72) contrast(1.05); /* dark HUD tint */
   pointer-events: none;
 }
-.map-tile-loading { opacity: 0.3; }
+.map-tile-loading { opacity: 0.3; transition: opacity 0.25s ease-out; }
+.map-tile-stale { opacity: 0.72; }
 .map-tile-ph {
   background: repeating-linear-gradient(
     45deg, rgba(138, 151, 163, 0.16) 0 10px, rgba(138, 151, 163, 0.05) 10px 20px);
